@@ -1,0 +1,31 @@
+{
+  "name": "vinyl-peer-plugin-music",
+  "version": "0.0.1",
+  "authors": [
+    "KDLabs"
+  ],
+  "type": "module",
+  "main": "dist/cjs/index.js",
+  "module": "dist/esm/index.js", 
+  "types": "dist/esm/index.d.ts",
+  "exports": {
+    "import": "./dist/esm/index.js",
+    "require": "./dist/cjs/index.js"
+  },
+  "scripts": {
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build": "rimraf dist && npm run build:esm && npm run build:cjs",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "vinyl-peer-protocol": "workspace:*"
+  },
+  "devDependencies": {
+     "@types/express": "^5.0.2",
+    "@types/node": "^18.7.23",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

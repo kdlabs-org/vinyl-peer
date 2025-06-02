@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "lib": ["ES2020", "DOM"],
+    "moduleResolution": "Node",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "jsx": "react",
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "vinyl-peer-protocol": ["vinyl-peer-protocol/dist"],
+      "vinyl-peer-cli": ["vinyl-peer-cli/dist"],
+      "vinyl-peer-plugin-music": ["vinyl-peer-plugin-music/dist"],
+      "vinyl-peer-plugin-analytics": ["vinyl-peer-plugin-analytics/dist"],
+      "vinyl-peer-plugin-replication": ["vinyl-peer-plugin-replication/dist"]
+    },
+    "declaration": true
+  },
+  "include": ["packages/**/*"],
+    "ts-node": {
+    "esm": false
+  }
+}
