@@ -30,7 +30,7 @@
     "tsx": "^4.19.4",
     "vinyl-peer-plugin-analytics": "workspace:*",
     "vinyl-peer-plugin-music": "workspace:*",
-    "vinyl-peer-protocol": "workspace:*",
+    "vinyl-peer-protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/commander": "^2.12.2",

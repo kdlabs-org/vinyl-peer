@@ -1,5 +1,3 @@
-// packages/vinyl-peer-cli/src/index.ts
-
 import { Command } from "commander";
 import path from "path";
 import fs from "fs";

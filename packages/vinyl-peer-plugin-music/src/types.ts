@@ -1,5 +1,3 @@
-// packages/vinyl-peer-music-plugin/src/types.ts
-
 /**
  * MusicMetadata: All the fields our plugin knows about for each audio file.
  */
