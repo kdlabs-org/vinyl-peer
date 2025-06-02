@@ -6,7 +6,7 @@ import {
   VinylPeerPlugin,
 } from "vinyl-peer-protocol";
 import { PeerInfo, FileInfo, NetworkFileInfo, UploadFile } from "vinyl-peer-protocol";
-import { MusicMetadata, MusicDiscoveryQuery, MusicRecommendation } from "./types.js";
+import { MusicMetadata, MusicDiscoveryQuery } from "./types.js";
 
 export class MusicPlugin extends BasePlugin implements VinylPeerPlugin {
   protected context!: PluginContext;
@@ -62,6 +62,7 @@ export class MusicPlugin extends BasePlugin implements VinylPeerPlugin {
   /** Once NodeService has started, set up libp2p protocol handlers. */
   async start(): Promise<void> {
     await super.start();
+    this.startCapabilityAnnouncements();
   }
 
   /** Stop any running intervals or services (nothing to clean up here). */
@@ -272,8 +273,6 @@ export class MusicPlugin extends BasePlugin implements VinylPeerPlugin {
       streamId: c.streamId,
       pinned: c.pinned,
       shareLink: c.shareLink,
-      audioCID: c.audioCID,
-      audioStreamId: c.audioStreamId,
       metadata: c.metadata,
       peerId: c.peerId,
       peerAddress: c.peerAddress,
@@ -290,10 +289,17 @@ export class MusicPlugin extends BasePlugin implements VinylPeerPlugin {
 
   /** Called by PluginManager when any peer connects. */
   onPeerConnected(peerId: string, peer: PeerInfo): void {
-    if (peer.isMusicNode) {
-      console.log(`MusicPlugin: connected music peer ${peerId.substring(0, 16)}…`);
-      this.musicPeers.add(peerId);
-      this.emit("musicPeerConnected", { peerId, peer });
+    // Attempt to dial /vinyl-network/1.0.0 to identify music peers
+    if (this.context?.libp2p && this.context.libp2p.isStarted) {
+      this.context.libp2p
+        .dialProtocol(peerId, "/vinyl-network/1.0.0")
+        .then(() => {
+          this.musicPeers.add(peerId);
+          this.emit("musicPeerConnected", { peerId });
+        })
+        .catch(() => {
+          // Peer doesn’t support music protocol
+        });
     }
   }
 
@@ -330,6 +336,20 @@ export class MusicPlugin extends BasePlugin implements VinylPeerPlugin {
   /** Return an Express router containing all music‐specific endpoints. */
   getHttpRouter(): express.Router {
     const router = express.Router();
+
+    /**
+     * POST /api/music/search
+     * → Accept a MusicDiscoveryQuery in the request body and return matching files.
+     */
+    router.post("/search", async (req: Request, res: Response) => {
+      try {
+        const query: MusicDiscoveryQuery = req.body;
+        const results = await this.searchFiles(query);
+        res.json({ results });
+      } catch (err: any) {
+        res.status(400).json({ error: err.message });
+      }
+    });
 
     /**
      * GET /api/music/recommendations/:cid
@@ -516,8 +536,6 @@ export class MusicPlugin extends BasePlugin implements VinylPeerPlugin {
     if (!this.context) return;
     const existingPeer = this.context.peers.get(peerId);
     if (existingPeer) {
-      existingPeer.isMusicNode = true;
-      existingPeer.musicNodeCapabilities = capabilities;
       this.musicPeers.add(peerId);
       console.log(`MusicPlugin: identified music peer "${peerId.substring(0, 16)}..."`);
       this.emit("musicPeerConnected", { peerId, peer: existingPeer });
@@ -534,7 +552,7 @@ export class MusicPlugin extends BasePlugin implements VinylPeerPlugin {
         const connections = this.context.libp2p.getConnections();
         for (const conn of connections) {
           try {
-            await this.context!.libp2p.dialProtocol(conn.remotePeer, "/vinyl-network/1.0.0");
+            await this.context.libp2p.dialProtocol(conn.remotePeer, "/vinyl-network/1.0.0");
           } catch {
             // Peer doesn't support music protocol
           }
@@ -543,3 +561,5 @@ export class MusicPlugin extends BasePlugin implements VinylPeerPlugin {
     }, 15000);
   }
 }
+
+export * from "./types.js";

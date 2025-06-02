@@ -1,3 +1,5 @@
+import type { Application, Router } from "express";
+
 /**
  * PeerInfo: Basic information about a peer in the network.
  */
@@ -7,8 +9,6 @@ export interface PeerInfo {
   status: "connected" | "disconnected" | "connecting";
   lastSeen: Date;
   latency?: number;
-  isMusicNode?: boolean;
-  musicNodeCapabilities?: string[];
 }
 
 /**
@@ -23,7 +23,6 @@ export interface NodeStats {
   downloadedFiles: number;
   storageUsed: number;
   storageAvailable: number;
-  musicPeers: number;
   pinnedFiles: number;
 }
 
@@ -46,8 +45,6 @@ export interface FileInfo {
   streamId?: string;
   pinned?: boolean;
   shareLink?: string;
-  audioCID?: string;
-  audioStreamId?: string;
   metadata?: any;
 }
 
@@ -126,8 +123,6 @@ export interface PluginCapabilities {
  * HttpPlugin: If a plugin wishes to expose HTTP routes,
  * it must implement getHttpNamespace() + getHttpRouter().
  */
-import type { Application, Router } from "express";
-
 export interface HttpPlugin {
   /** e.g. returns "/analytics" */
   getHttpNamespace(): string;
@@ -163,5 +158,3 @@ export interface VinylPeerPlugin {
   getHttpNamespace?(): string;
   getHttpRouter?(): Application | Router;
 }
-
-export * from "./types.js";

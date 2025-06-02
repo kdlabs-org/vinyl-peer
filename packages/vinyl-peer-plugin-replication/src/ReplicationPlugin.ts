@@ -1,4 +1,4 @@
-import express, { Request, Response, Router } from "express";
+import express, { Router } from "express";
 import {
   BasePlugin,
   PluginCapabilities,
@@ -6,43 +6,73 @@ import {
   VinylPeerPlugin,
 } from "vinyl-peer-protocol";
 
-export class ReplicationPlugin extends BasePlugin implements VinylPeerPlugin {
-  // We widen visibility to `protected` so that it matches BasePlugin
-  protected context!: PluginContext;
-  private enabled: boolean = true; // Auto‐replication (auto‐pin) is ON by default
+interface ReplicationOptions {
+  autoPinLocal?: boolean; // pin when *this* node downloads
+  autoPinRemote?: boolean; // pin when *other* nodes announce
+  topic?: string; // pubsub topic (defaults to "vinyl:replicate")
+}
 
-  constructor() {
+export class ReplicationPlugin extends BasePlugin implements VinylPeerPlugin {
+  protected context!: PluginContext;
+  private enabled: boolean = true;
+  private readonly TOPIC: string;
+  private autoPinLocal: boolean;
+  private autoPinRemote: boolean;
+
+  constructor(opts: ReplicationOptions = {}) {
     super();
+    this.autoPinLocal = opts.autoPinLocal ?? true;
+    this.autoPinRemote = opts.autoPinRemote ?? true;
+    this.TOPIC = opts.topic ?? "vinyl:replicate";
   }
 
-  /**
-   * Declare plugin identity, capabilities, and required permissions.
-   * This plugin exposes HTTP routes for toggling replication.
-   */
   getCapabilities(): PluginCapabilities {
     return {
       name: "vinyl-peer-replication-plugin",
       version: "1.0.0",
-      protocols: [], // no custom libp2p protocols
+      protocols: [],
       capabilities: ["replication"],
-      fileTypes: [], // applies to any file type
+      fileTypes: [],
       permissions: {
-        accessFiles: true, // needed to call pinFile()
-        useNetwork: false,
+        accessFiles: true,
+        useNetwork: true,
         modifyPeers: false,
-        exposeHttp: true, // since we expose HTTP endpoints
+        exposeHttp: true,
       },
     };
   }
 
-  /**
-   * Standard initialize; store context and mark as initialized.
-   * We rely on PluginContext to provide pinFile/unpinFile methods.
-   */
   async initialize(context: PluginContext): Promise<boolean> {
     const ok = await super.initialize(context);
     if (!ok) return false;
     this.context = context;
+
+    // Only subscribe to remote‐replicate messages if configured:
+    if (this.autoPinRemote) {
+      try {
+        await this.context.libp2p.pubsub.subscribe(this.TOPIC);
+        this.context.libp2p.pubsub.addEventListener("message", (evt: any) => {
+          if (evt.detail.topic !== this.TOPIC) return;
+          try {
+            const msg = JSON.parse(new TextDecoder().decode(evt.detail.data));
+            if (msg.type === "replicate" && this.enabled) {
+              const cid = msg.cid as string;
+              // If we already have it, skip:
+              if (!this.context.files.has(cid)) {
+                this.context.pinFile(cid).catch((err) => {
+                  console.error(`ReplicationPlugin: failed to pin ${cid}:`, err);
+                });
+              }
+            }
+          } catch {
+            /* ignore invalid JSON */
+          }
+        });
+      } catch (err: any) {
+        console.error("ReplicationPlugin: could not subscribe to replication topic:", err);
+      }
+    }
+
     return true;
   }
 
@@ -60,60 +90,51 @@ export class ReplicationPlugin extends BasePlugin implements VinylPeerPlugin {
     // no‐op
   }
 
-  /**
-   * Called by PluginManager whenever any file is downloaded.
-   * If auto‐replication is enabled, immediately pin the given CID.
-   */
   onFileDownloaded?(cid: string): void {
-    if (!this.enabled) {
-      console.log(`ReplicationPlugin: auto‐replication is OFF, skipping pin for "${cid}".`);
-      return;
+    // Only auto‐pin locally if configured:
+    if (this.autoPinLocal && this.enabled) {
+      this.context
+        .pinFile(cid)
+        .then(() => {
+          console.log(`ReplicationPlugin: automatically pinned "${cid}".`);
+        })
+        .catch((err) => {
+          console.error(`ReplicationPlugin: failed to pin "${cid}":`, err);
+        });
     }
 
-    // Attempt to pin via context.pinFile(...)
-    this.context
-      .pinFile(cid)
-      .then(() => {
-        console.log(`ReplicationPlugin: automatically pinned "${cid}".`);
-      })
-      .catch((err) => {
-        console.error(`ReplicationPlugin: failed to pin "${cid}":`, err);
-      });
+    // Only broadcast to remote peers if configured:
+    if (this.autoPinRemote && this.enabled) {
+      const payload = JSON.stringify({ type: "replicate", cid });
+      this.context.libp2p.pubsub
+        .publish(this.TOPIC, new TextEncoder().encode(payload))
+        .catch((e: any) => console.error("ReplicationPlugin: pubsub error:", e));
+    }
   }
 
-  /**
-   * Declare the HTTP namespace under which this plugin will mount its routes.
-   */
   getHttpNamespace(): string {
     return "/replication";
   }
 
-  /**
-   * Return an Express.Router containing three endpoints:
-   *   • GET  /replication/status → { enabled: boolean }
-   *   • POST /replication/on     → turn auto‐replication ON
-   *   • POST /replication/off    → turn auto‐replication OFF
-   */
   getHttpRouter(): Router {
     const router = express.Router();
 
-    // GET /replication/status
-    router.get("/status", (req: Request, res: Response) => {
-      res.json({ enabled: this.enabled });
+    router.get("/status", (_req, res) => {
+      res.json({
+        enabled: this.enabled,
+        autoPinLocal: this.autoPinLocal,
+        autoPinRemote: this.autoPinRemote,
+      });
     });
 
-    // POST /replication/on
-    router.post("/on", (req: Request, res: Response) => {
+    router.post("/on", (_req, res) => {
       this.enabled = true;
-      console.log("ReplicationPlugin: auto‐replication turned ON.");
-      res.json({ enabled: true, message: "Auto‐replication is now ON." });
+      res.json({ enabled: true, message: "Auto-replication is now ON." });
     });
 
-    // POST /replication/off
-    router.post("/off", (req: Request, res: Response) => {
+    router.post("/off", (_req, res) => {
       this.enabled = false;
-      console.log("ReplicationPlugin: auto‐replication turned OFF.");
-      res.json({ enabled: false, message: "Auto‐replication is now OFF." });
+      res.json({ enabled: false, message: "Auto-replication is now OFF." });
     });
 
     return router;

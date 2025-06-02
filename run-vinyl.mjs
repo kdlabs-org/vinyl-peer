@@ -2,7 +2,6 @@ import { Vinyl } from "./packages/vinyl-peer-protocol/dist/esm/index.js";
 import { MusicPlugin } from "./packages/vinyl-peer-plugin-music/dist/esm/index.js";
 import { AnalyticsPlugin } from "./packages/vinyl-peer-plugin-analytics/dist/esm/index.js";
 import { ReplicationPlugin } from "./packages/vinyl-peer-plugin-replication/dist/esm/index.js";
-import { WebServer } from "./packages/vinyl-peer-cli/dist/esm/WebServer.js";
 
 async function main() {
   // 1) Instantiate Vinyl with Music, Analytics, and Replication plugins
@@ -27,28 +26,37 @@ async function main() {
     }`
   );
 
-  // 3) Start the HTTP server on port 3001
-  const webServer = new WebServer(vinyl);
-  await webServer.start(3001);
-  console.log("🌐 Web server listening at http://localhost:3001");
+  // 3) Start Vinyl’s built-in HTTP server on port 3001
+  //    This will log each plugin’s mounted route as it goes.
+  await vinyl.startHttp(3001);
+  console.log("🌐 HTTP server listening at http://localhost:3001");
 
   // 4) Forward all Vinyl events to the console
   vinyl.onEvent((eventName, data) => {
+    // Uncomment the next line if you want to log every event:
     console.log(`[event] ${eventName}:`, data);
   });
 
-  // 5) Clean up on SIGINT: stop both Vinyl node and HTTP server
-  process.on("SIGINT", async () => {
+  // 5) Clean up on SIGINT or SIGTERM: stop both HTTP server and Vinyl node
+  const shutdown = async () => {
     console.log("\n🛑 Shutting down Vinyl...");
-
-    await webServer.stop();
-    console.log("✅ Web server stopped.");
-
-    await vinyl.stop();
-    console.log("✅ Vinyl node stopped.");
-
+    try {
+      await vinyl.stopHttp();
+      console.log("✅ HTTP server stopped.");
+    } catch (err) {
+      console.error("Error stopping HTTP server:", err);
+    }
+    try {
+      await vinyl.stop();
+      console.log("✅ Vinyl node stopped.");
+    } catch (err) {
+      console.error("Error stopping Vinyl node:", err);
+    }
     process.exit(0);
-  });
+  };
+
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 }
 
 main().catch((err) => {

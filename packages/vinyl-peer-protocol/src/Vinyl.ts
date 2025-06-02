@@ -1,6 +1,8 @@
+// src/Vinyl.ts
 import { createLibp2p } from "libp2p";
 import { webSockets } from "@libp2p/websockets";
 import { webRTC } from "@libp2p/webrtc";
+import { gossipsub } from "@chainsafe/libp2p-gossipsub";
 import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import { noise } from "@chainsafe/libp2p-noise";
 import { yamux } from "@chainsafe/libp2p-yamux";
@@ -10,8 +12,11 @@ import { ping } from "@libp2p/ping";
 import { bootstrap } from "@libp2p/bootstrap";
 import { createHelia } from "helia";
 import { unixfs } from "@helia/unixfs";
-import { v4 as uuidv4 } from "uuid";
 
+import { LevelBlockstore } from "blockstore-level";
+import { Level } from "level";
+
+import { v4 as uuidv4 } from "uuid";
 import { PluginManager } from "./PluginManager.js";
 import { PluginContext, VinylPeerPlugin } from "./PluginInterface.js";
 import { PluginPermissions } from "./types.js";
@@ -27,19 +32,22 @@ import {
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import http from "http";
 
-import type express from "express";
+import express, { Express, Request, Response } from "express";
+import multer from "multer";
+import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import mime from "mime-types";
 
 import { fileURLToPath } from "url";
-
-import rateLimit from "express-rate-limit";
-
 import { z } from "zod";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ---------- Schema for event-envelope validation ----------
+// ---------- Schema for event‐envelope validation ----------
 const BaseEnvelopeSchema = z.object({
   source: z.string(),
   payload: z.any(),
@@ -59,29 +67,32 @@ export class Vinyl {
   private libp2p: any = null;
   private helia: any = null;
   private fs: any = null;
+  private nodeStarted: boolean = false;
 
   // Unique node identifier
   private nodeId: string;
 
-  // In-memory maps of peers, files, and network-advertised files
+  // In‐memory maps of peers, streaming blobs, and network‐advertised files
   private peers: Map<string, PeerInfo> = new Map();
-  private files: Map<string, FileInfo> = new Map();
   private streamingFiles: Map<string, Uint8Array> = new Map();
   private networkFiles: Map<string, NetworkFileInfo> = new Map();
+
+  // Persisted file index (metadata CIDs → FileInfo) on LevelDB
+  private fileDb!: Level<string, FileInfo>;
 
   // Set of CIDs that have been pinned locally
   private pinnedFiles: Set<string> = new Set();
 
-  private origin: string[] = []; // Allowed origins for CORS (default: allow all)
+  // Allowed origins for CORS (default: allow all)
+  private origin: string[] = [];
 
   /**
    * PLUGIN + NODE EVENT BUS:
-   * We keep a private array of listeners, each is (eventName, data) => void.
-   * Plugins and external code can subscribe via `on()` or `onEvent()`.
+   * An array of callbacks (eventName, { source, payload }).
    */
   private listeners: ((event: string, envelope: { source: string; payload: any }) => void)[] = [];
 
-  // AES-GCM CryptoKey versions map
+  // AES‐GCM CryptoKey versions map
   private cryptoKeys: Map<number, CryptoKey> = new Map();
   private currentKeyVersion: number = 0;
 
@@ -89,7 +100,7 @@ export class Vinyl {
   private auditKey: Buffer = crypto.randomBytes(32);
   private auditLogPath: string = path.join(__dirname, "vinyl-audit.log");
 
-  // “Current” encryption key (for convenience; always matches cryptoKeys.get(currentKeyVersion))
+  // “Current” encryption key
   private encryptionKey: CryptoKey | null = null;
 
   // Whether local IPFS storage is enabled (Helia)
@@ -99,6 +110,12 @@ export class Vinyl {
   private pluginManager: PluginManager;
   private pluginInstances: VinylPeerPlugin[];
   private nodePermissions: PluginPermissions;
+
+  // ─── HTTP server for core + plugins ───
+  private httpApp: Express;
+  private httpServer: http.Server | null = null;
+  private upload: multer.Multer;
+  private recentEvents: { event: string; data: any; timestamp: number }[] = [];
 
   constructor(plugins: VinylPeerPlugin[] = [], globalPermissions?: PluginPermissions) {
     // Generate a UUID to identify this node (if libp2p fails, fallback to this)
@@ -114,10 +131,17 @@ export class Vinyl {
 
     this.pluginManager = new PluginManager();
     this.pluginInstances = plugins;
+
+    // ─────────── Initialize Express & Multer ───────────
+    this.httpApp = express();
+    this.upload = multer({ storage: multer.memoryStorage() });
+    this.setupMiddleware();
+    this.setupCoreRoutes();
+    this.setupEventSSE();
   }
 
   /**
-   * Helper to detect if running in a browser (window + document exist).
+   * Helper to detect if running in a browser (window+document exist).
    */
   private isBrowser(): boolean {
     return typeof window !== "undefined" && typeof window.document !== "undefined";
@@ -146,9 +170,7 @@ export class Vinyl {
   }> {
     if (this.isBrowser()) {
       return {
-        addresses: {
-          listen: ["/webrtc"],
-        },
+        addresses: { listen: ["/webrtc"] },
         transports: [webSockets(), webRTC(), circuitRelayTransport()],
       };
     } else {
@@ -188,63 +210,246 @@ export class Vinyl {
     return services;
   }
 
+  private setupMiddleware(): void {
+    this.httpApp.use(cors());
+    this.httpApp.use(express.json());
+    this.httpApp.use(express.static("public"));
+  }
+
   /**
-   * Set up libp2p event listeners for peer connect/disconnect,
-   * then notify plugins and emit our own events.
+   * Register core HTTP routes for status, peers, files, upload/download, etc.
    */
-  private setupEventListeners(): void {
-    if (!this.libp2p) return;
-
-    this.libp2p.addEventListener("peer:connect", (evt: any) => {
-      const peerId = evt.detail.toString();
-      console.log("Vinyl: peer connected:", peerId);
-
-      const peerInfo: PeerInfo = {
-        id: peerId,
-        address: "unknown",
-        status: "connected",
-        lastSeen: new Date(),
-        isMusicNode: false,
-      };
-      this.peers.set(peerId, peerInfo);
-      this.pluginManager.notifyPeerConnected(peerId, peerInfo);
-      this.emit("peerConnected", { source: "vinyl", payload: { peerId } });
+  private setupCoreRoutes(): void {
+    // ─── Node status ───
+    this.httpApp.get("/api/status", (req: Request, res: Response) => {
+      try {
+        const stats = this.getNodeStats();
+        res.json({
+          status: "ok",
+          nodeId: stats.id,
+          isRunning: this.nodeStarted === true, // this.libp2p?.isStarted === true,
+          stats,
+        });
+      } catch (err: any) {
+        res.status(500).json({ error: err.message });
+      }
     });
 
-    this.libp2p.addEventListener("peer:disconnect", (evt: any) => {
-      const peerId = evt.detail.toString();
-      console.log("Vinyl: peer disconnected:", peerId);
-
-      const pi = this.peers.get(peerId);
-      if (pi) {
-        pi.status = "disconnected";
-        this.peers.set(peerId, pi);
-        this.pluginManager.notifyPeerDisconnected(peerId, pi);
+    this.httpApp.get("/api/plugins", (req: Request, res: Response) => {
+      try {
+        const allPlugins = this.pluginManager.getAllPlugins();
+        const info = allPlugins.map((p: VinylPeerPlugin) => {
+          const caps = p.getCapabilities();
+          return {
+            name: caps.name,
+            version: caps.version,
+            protocols: caps.protocols,
+            capabilities: caps.capabilities,
+          };
+        });
+        res.json(info);
+      } catch (err: any) {
+        res.status(500).json({ error: err.message });
       }
-      this.emit("peerDisconnected", { source: "vinyl", payload: { peerId } });
+    });
+
+    // ─── Peer list ───
+    this.httpApp.get("/api/peers", (req: Request, res: Response) => {
+      try {
+        res.json(this.getPeers());
+      } catch (err: any) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ─── File list ─── (reads from LevelDB)
+    this.httpApp.get("/api/files", async (req: Request, res: Response) => {
+      try {
+        const files: FileInfo[] = [];
+        // LevelDB supports async iteration
+        for await (const [cid, info] of this.fileDb.iterator()) {
+          files.push(info);
+        }
+        res.json(files);
+      } catch (err: any) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ─── Upload ───
+    this.httpApp.post(
+      "/api/upload",
+      this.upload.single("file"),
+      async (req: Request, res: Response) => {
+        try {
+          if (!req.file) {
+            res.status(400).json({ error: "No file uploaded" });
+            return;
+          }
+
+          const storageMode = (req.body.storageMode as StorageMode) || "ipfs";
+          const metadata = req.body.metadata ? JSON.parse(req.body.metadata as string) : undefined;
+
+          const buffer = req.file.buffer;
+          const originalName = req.file.originalname;
+          const mimeType =
+            req.file.mimetype ||
+            (mime.lookup(originalName) as string) ||
+            "application/octet-stream";
+
+          // Adapt Buffer → UploadFile
+          const nodeFile: UploadFile = {
+            name: originalName,
+            size: buffer.length,
+            type: mimeType,
+            arrayBuffer: async () => {
+              const ab = new ArrayBuffer(buffer.byteLength);
+              new Uint8Array(ab).set(buffer);
+              return ab;
+            },
+          };
+
+          const cid = await this.uploadFile(nodeFile, storageMode, metadata);
+          res.json({ success: true, cid });
+        } catch (err: any) {
+          console.error("Vinyl (HTTP): upload error:", err);
+          res.status(500).json({ error: err.message });
+        }
+      },
+    );
+
+    // ─── Download ───
+    this.httpApp.get("/api/download/:cid", async (req: Request, res: Response) => {
+      try {
+        const cid = req.params.cid;
+        const data = await this.downloadFile(cid);
+        if (!data) {
+          res.status(404).json({ error: "File not found" });
+          return;
+        }
+        res.setHeader("Content-Type", "application/octet-stream");
+        res.setHeader("Content-Disposition", `attachment; filename="${cid}"`);
+        res.send(Buffer.from(data));
+      } catch (err: any) {
+        console.error("Vinyl (HTTP): download error:", err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ─── Search ───
+    this.httpApp.get("/api/search", async (req: Request, res: Response) => {
+      try {
+        const query = req.query.q as string;
+        if (!query) {
+          res.status(400).json({ error: "Query parameter 'q' is required" });
+          return;
+        }
+        const results = await this.searchFiles(query);
+        res.json(results);
+      } catch (err: any) {
+        console.error("Vinyl (HTTP): search error:", err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ─── Pin / Unpin ───
+    this.httpApp.post("/api/pin/:cid", async (req: Request, res: Response) => {
+      try {
+        const cid = req.params.cid;
+        await this.pinFile(cid);
+        res.json({ success: true, message: "File pinned successfully" });
+      } catch (err: any) {
+        console.error("Vinyl (HTTP): pin error:", err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    this.httpApp.delete("/api/pin/:cid", async (req: Request, res: Response) => {
+      try {
+        const cid = req.params.cid;
+        await this.unpinFile(cid);
+        res.json({ success: true, message: "File unpinned successfully" });
+      } catch (err: any) {
+        console.error("Vinyl (HTTP): unpin error:", err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // ─── Health check ───
+    this.httpApp.get("/health", (req: Request, res: Response) => {
+      res.json({ status: "healthy", timestamp: new Date().toISOString() });
+    });
+  }
+
+  /**
+   * Enable Server‐Sent Events (SSE) at `/api/events` for recent events replay.
+   */
+  private setupEventSSE(): void {
+    this.onEvent((evt, data) => {
+      this.recentEvents.push({ event: evt, data, timestamp: Date.now() });
+      if (this.recentEvents.length > 500) this.recentEvents.shift();
+    });
+
+    this.httpApp.get("/api/events", (req: Request, res: Response) => {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      });
+      res.write(":\n\n"); // initial SSE comment
+
+      const sendEvent = (name: string, payload: any) => {
+        res.write(`event: ${name}\n`);
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      };
+
+      // Replay last 20 events
+      const replayCount = Math.min(20, this.recentEvents.length);
+      for (let i = this.recentEvents.length - replayCount; i < this.recentEvents.length; i++) {
+        const e = this.recentEvents[i];
+        sendEvent(e.event, e.data);
+      }
+
+      // Subscribe to new events
+      const listener = (evtName: string, envelope: any) => {
+        sendEvent(evtName, envelope.payload);
+      };
+      this.onEvent(listener);
+
+      req.on("close", () => {
+        // optionally remove listener, if implemented
+      });
     });
   }
 
   /**
    * Initialize the node:
-   * 1) Build libp2p with transports, mDNS/Bootstrap, encryption, DHT, etc.
-   * 2) Generate or import AES‐GCM key via Web Crypto.
-   * 3) If localStorage enabled, spin up a Helia (IPFS) node and UnixFS.
-   * 4) Build PluginContext (including permissions), register all plugins, start libp2p, then plugins.
+   * 1) Create/use a LevelDB for `fileDb`.
+   * 2) Build libp2p with transports, DHT, Gossipsub, etc.
+   * 3) Generate encryption key.
+   * 4) Spin up Helia with LevelBlockstore (persisted under "./helia-repo").
+   * 5) Build PluginContext and register plugins.
+   * 6) Start libp2p and plugins.
    */
   async initialize(enableLocalStorage: boolean = true, origin?: string[]): Promise<boolean> {
     try {
-      console.log("Vinyl: Initializing libp2p node...");
-      this.localStorageEnabled = enableLocalStorage;
-      this.origin = origin || ["*"]; // Default to allow all origins
+      console.log("Vinyl: Initializing LevelDB for file metadata…");
+      // 1) Open (or create) LevelDB under "./vinyl-filedb"
+      this.fileDb = new Level<string, FileInfo>(path.join(__dirname, "vinyl-filedb"), {
+        valueEncoding: "json",
+      });
 
-      // 1) Build transports & addresses
+      console.log("Vinyl: Initializing libp2p node…");
+      this.localStorageEnabled = enableLocalStorage;
+      this.origin = origin || ["*"];
+
+      // 2) Build transports & addresses
       const { addresses, transports } = await this.getTransportsAndAddresses();
 
-      // 2) Build peer discovery modules
+      // 3) Build peer discovery modules
       const peerDiscoveryServices = await this.getPeerDiscoveryServices();
 
-      // 3) Construct the libp2p node
+      // 4) Construct the libp2p node (with Gossipsub)
       this.libp2p = await createLibp2p({
         addresses,
         transports,
@@ -255,27 +460,33 @@ export class Vinyl {
           identify: identify(),
           dht: kadDHT({ clientMode: this.isBrowser() }),
           ping: ping(),
+          // corrected prop: allowPublishToZeroTopicPeers
+          pubsub: gossipsub({ allowPublishToZeroTopicPeers: true }),
           ...peerDiscoveryServices,
         },
       });
 
-      // 4) Generate or import AES‐GCM key (initial rotation)
+      // 5) Generate or import AES‐GCM key (initial rotation)
       await this.rotateEncryptionKey();
 
-      // 5) If localStorage enabled, initialize Helia (IPFS) & UnixFS
+      // 6) If localStorage enabled, initialize Helia (IPFS) & UnixFS with LevelBlockstore
       if (this.localStorageEnabled) {
-        console.log("Vinyl: Initializing Helia (IPFS) node...");
-        this.helia = await createHelia({ libp2p: this.libp2p });
+        console.log("Vinyl: Initializing Helia (IPFS) node with LevelBlockstore…");
+        // Persist blocks under "./helia-repo"
+        this.helia = await createHelia({
+          libp2p: this.libp2p,
+          blockstore: new LevelBlockstore(path.join(__dirname, "helia-repo")),
+        });
         this.fs = unixfs(this.helia);
       } else {
         console.log("Vinyl: Local storage disabled → relay-only mode");
       }
 
-      // 6) Build PluginContext
+      // 7) Build PluginContext
       const pluginContext: PluginContext = {
         nodeId: this.libp2p.peerId.toString(),
         libp2p: this.libp2p,
-        files: this.files,
+        files: this.filesView(), // pass an async iterator‐backed “view” of fileDb
         peers: this.peers,
         networkFiles: this.networkFiles,
         emit: (event, envelope) => {
@@ -283,12 +494,11 @@ export class Vinyl {
             console.warn("Vinyl: invalid event envelope, dropping:", envelope);
             return;
           }
-          // Broadcast event to all registered listeners
           for (const listener of this.listeners) {
             try {
               listener(event, envelope);
             } catch {
-              // Ignore individual listener errors
+              // ignore
             }
           }
         },
@@ -298,16 +508,10 @@ export class Vinyl {
       };
       this.pluginManager.setContext(pluginContext);
 
-      // 7) Register each plugin instance
+      // 8) Register each plugin instance
       for (const plugin of this.pluginInstances) {
         const caps = plugin.getCapabilities();
-        console.log(`Vinyl: registering plugin "${caps.name}" v${caps.version}...`);
-
-        // If plugin exposes HTTP, mount it under a secure sub‐router
-        if (caps.permissions.exposeHttp && plugin.getHttpRouter && plugin.getHttpNamespace) {
-          this.setupHttpForPlugin(plugin);
-        }
-
+        console.log(`Vinyl: registering plugin "${caps.name}" v${caps.version}…`);
         const success = await this.pluginManager.registerPlugin(plugin);
         if (success) {
           await this.signAndAppend({
@@ -321,11 +525,12 @@ export class Vinyl {
         }
       }
 
-      // 8) Set up peer event listeners, then start libp2p
+      // 9) Listen for libp2p events, then start libp2p
       this.setupEventListeners();
       await this.libp2p.start();
+      this.nodeStarted = true;
 
-      // 9) Start all plugins after libp2p is live
+      // 10) Start plugins
       await this.pluginManager.startAllPlugins();
 
       console.log(`Vinyl: Node started with ID: ${this.libp2p.peerId.toString()}`);
@@ -343,6 +548,7 @@ export class Vinyl {
             console.error("Vinyl: key rotation failed:", err);
           });
         },
+
         24 * 60 * 60 * 1000,
       );
 
@@ -355,45 +561,98 @@ export class Vinyl {
   }
 
   /**
-   * Setup a secured HTTP sub‐app for a plugin (if it wants to expose an HTTP API).
+   * Convert our LevelDB `fileDb` into an object that mimics a Map interface
+   * (so plugins that do `context.files.values()` still work). We return an
+   * async‐iterator of all values in LevelDB.
    */
-  private async setupHttpForPlugin(plugin: VinylPeerPlugin) {
-    if (!plugin.getHttpRouter || !plugin.getHttpNamespace) return;
-    const express = (await import("express")).default;
-    const helmet = (await import("helmet")).default;
-    const cors = (await import("cors")).default;
-    const app = express();
+  private filesView(): Map<string, FileInfo> {
+    // Return a pseudo‐Map backed by LevelDB:
+    const pseudoMap = new Map<string, FileInfo>();
+    (async () => {
+      for await (const [cid, info] of this.fileDb.iterator()) {
+        pseudoMap.set(cid, info);
+      }
+    })();
+    return pseudoMap;
+  }
 
-    // Enforce strict CORS policy (adjust as needed)
-    app.use(
-      cors({
-        origin: this.origin, // change to your allowed origins
-        methods: ["GET", "POST", "PUT", "DELETE"],
-        credentials: true,
-      }),
-    );
-    app.use(helmet());
+  /**
+   * Mount each plugin’s HTTP router onto our Express app under its namespace.
+   * Must be called after initialize() so plugins have been registered.
+   */
+  private mountPluginRouters(): void {
+    const allPlugins = this.pluginManager.getAllPlugins();
+    for (const plugin of allPlugins) {
+      if (
+        typeof (plugin as any).getHttpNamespace === "function" &&
+        typeof (plugin as any).getHttpRouter === "function"
+      ) {
+        let namespace: string = (plugin as any).getHttpNamespace();
+        const router = (plugin as any).getHttpRouter();
 
-    // Rate limiter: max 100 requests per 15 minutes per IP
-    const limiter = rateLimit({
-      windowMs: 15 * 60 * 1000,
-      max: 100,
-      standardHeaders: true,
-      legacyHeaders: false,
-      message: { error: "Too many requests – try again later." },
-    });
+        // Normalize namespace: must start with "/" and have no trailing slash
+        if (!namespace.startsWith("/")) {
+          namespace = "/" + namespace;
+        }
+        if (namespace.endsWith("/") && namespace.length > 1) {
+          namespace = namespace.slice(0, -1);
+        }
 
-    const router = plugin.getHttpRouter() as express.Router;
-    app.use(plugin.getHttpNamespace(), limiter, router);
+        const limiter = rateLimit({
+          windowMs: 15 * 60 * 1000,
+          max: 100,
+          standardHeaders: true,
+          legacyHeaders: false,
+          message: { error: "Too many requests – try again later." },
+        });
 
-    // Mount plugin HTTP under main libp2p HTTP server if it exists
-    if (this.libp2p && (this.libp2p as any).httpServer) {
-      (this.libp2p as any).httpServer.use(plugin.getHttpNamespace(), app);
-    } else {
-      console.warn(
-        `Vinyl: libp2p has no HTTP server; plugin "${plugin.getCapabilities().name}" HTTP routes are unmounted`,
-      );
+        this.httpApp.use(
+          namespace,
+          cors({
+            origin: this.origin,
+            methods: ["GET", "POST", "PUT", "DELETE"],
+            credentials: true,
+          }),
+          helmet(),
+          limiter as any,
+          router as any,
+        );
+        console.log(`Vinyl (HTTP): mounted plugin routes at "${namespace}"`);
+      }
     }
+  }
+
+  /**
+   * Start the Express HTTP server (mount core + plugin routes).
+   */
+  startHttp(port: number = 3001): Promise<void> {
+    return new Promise(async (resolve, reject) => {
+      try {
+        this.mountPluginRouters();
+        this.httpServer = this.httpApp.listen(port, () => {
+          console.log(`Vinyl (HTTP): listening on http://localhost:${port}`);
+          resolve();
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  /**
+   * Stop the Express HTTP server gracefully.
+   */
+  stopHttp(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.httpServer) {
+        this.httpServer.close(() => {
+          console.log("Vinyl (HTTP): stopped");
+          resolve();
+        });
+      } else {
+        resolve();
+      }
+    });
   }
 
   /**
@@ -414,7 +673,7 @@ export class Vinyl {
         "decrypt",
       ]);
     } else {
-      throw new Error("Web Crypto AES-GCM not available");
+      throw new Error("Web Crypto AES‐GCM not available");
     }
 
     this.cryptoKeys.set(this.currentKeyVersion, newKey);
@@ -433,7 +692,6 @@ export class Vinyl {
       details: { version: this.currentKeyVersion },
     });
 
-    // Update “current” pointer
     this.encryptionKey = newKey;
   }
 
@@ -455,37 +713,20 @@ export class Vinyl {
   }
 
   /**
-   * Return the PluginManager so external code can query installed plugins.
-   */
-  getPluginManager(): PluginManager {
-    return this.pluginManager;
-  }
-
-  /**
    * Search across:
-   * 1) Local files (this.files) by matching name/metadata fields
-   * 2) Known networkFiles
+   * 1) Local files (metadata in LevelDB) by matching name only
+   * 2) Known networkFiles by matching name only
    * 3) Delegate to each plugin.searchFiles(...)
-   * Returns an array of NetworkFileInfo matches.
    */
   async searchFiles(query: string): Promise<NetworkFileInfo[]> {
     const results: NetworkFileInfo[] = [];
     const searchTerm = query.toLowerCase();
 
-    // 1) Local files
-    for (const file of this.files.values()) {
-      if (
-        file.name.toLowerCase().includes(searchTerm) ||
-        (file.metadata?.artist &&
-          (file.metadata.artist as string).toLowerCase().includes(searchTerm)) ||
-        (file.metadata?.album &&
-          (file.metadata.album as string).toLowerCase().includes(searchTerm)) ||
-        (file.metadata?.genre &&
-          (file.metadata.genre as string).toLowerCase().includes(searchTerm)) ||
-        (file.metadata?.title && (file.metadata.title as string).toLowerCase().includes(searchTerm))
-      ) {
+    // 1) Local files: iterate LevelDB
+    for await (const [cid, fileInfo] of this.fileDb.iterator()) {
+      if (fileInfo.name.toLowerCase().includes(searchTerm)) {
         results.push({
-          ...file,
+          ...fileInfo,
           peerId: this.libp2p.peerId.toString(),
           peerAddress: "local",
           availability: "online",
@@ -493,24 +734,14 @@ export class Vinyl {
       }
     }
 
-    // 2) Network files
+    // 2) Network files: match on file.name only
     for (const file of this.networkFiles.values()) {
-      const nameMatch = file.name.toLowerCase().includes(searchTerm);
-      const metadataMatch =
-        (file.metadata?.artist &&
-          (file.metadata.artist as string).toLowerCase().includes(searchTerm)) ||
-        (file.metadata?.album &&
-          (file.metadata.album as string).toLowerCase().includes(searchTerm)) ||
-        (file.metadata?.genre &&
-          (file.metadata.genre as string).toLowerCase().includes(searchTerm)) ||
-        (file.metadata?.title &&
-          (file.metadata.title as string).toLowerCase().includes(searchTerm));
-      if (nameMatch || metadataMatch) {
+      if (file.name.toLowerCase().includes(searchTerm)) {
         results.push(file);
       }
     }
 
-    // 3) Plugin-provided search
+    // 3) Plugin‐provided search
     const pluginResults = await this.pluginManager.searchFiles(query);
     results.push(...pluginResults);
 
@@ -527,16 +758,13 @@ export class Vinyl {
   /**
    * Upload a file:
    * 1) Read raw bytes (ArrayBuffer)
-   * 2) Encrypt with AES‐GCM using this.encryptionKey (prepend version + IV)
-   * 3) If storageMode = "ipfs" and localStorageEnabled:
-   *      • Add encrypted bytes to IPFS (Helia) → audioCID
-   *    Else:
-   *      • Create a "stream-<uuid>" ID → store encrypted bytes in-memory
-   *      • Announce stream over pubsub (placeholder)
-   * 4) Let each plugin enhance metadata via `enhanceFileMetadata()`
-   * 5) Create a metadata JSON object (file name, size, type, uploadDate, audioCID, etc.)
-   * 6) Store metadata JSON either on IPFS or in-memory stream
-   * 7) Construct FileInfo, store in `this.files`, notify plugins, emit "fileUploaded"
+   * 2) Encrypt with AES‐GCM (prepend version + IV)
+   * 3) If storageMode = "ipfs" and localStorageEnabled, add encrypted bytes to Helia→CID
+   *    Else create a “stream‐<uuid>” and keep in memory
+   * 4) Let plugins enhance metadata
+   * 5) Build metadata object and store it (either Helia or in‐memory)
+   * 6) Persist metadata FileInfo in LevelDB
+   * 7) Notify plugins and emit “fileUploaded”
    */
   async uploadFile(
     file: UploadFile,
@@ -559,50 +787,50 @@ export class Vinyl {
       // 1) Read raw bytes
       const arrayBuffer = await file.arrayBuffer();
 
-      // 2) Encrypt with AES‐GCM (prepend version byte + IV)
+      // 2) Encrypt with AES‐GCM (version byte + IV)
       const iv = this.isBrowser()
         ? window.crypto.getRandomValues(new Uint8Array(12))
         : crypto.webcrypto.getRandomValues(new Uint8Array(12));
 
-      // Encrypt using currentKeyVersion
-      const encryptedBuffer = await (this.isBrowser()
-        ? window.crypto.subtle.encrypt({ name: "AES-GCM", iv }, this.encryptionKey!, arrayBuffer)
-        : crypto.webcrypto.subtle.encrypt(
+      const encryptedBuffer = this.isBrowser()
+        ? await window.crypto.subtle.encrypt(
             { name: "AES-GCM", iv },
             this.encryptionKey!,
             arrayBuffer,
-          ));
+          )
+        : await crypto.webcrypto.subtle.encrypt(
+            { name: "AES-GCM", iv },
+            this.encryptionKey!,
+            arrayBuffer,
+          );
       const ciphertext = new Uint8Array(encryptedBuffer);
 
-      // Build [ version(1 byte) | IV(12 bytes) | ciphertext... ]
+      // Build [version(1) | IV(12) | ciphertext]
       const versionByte = new Uint8Array([this.currentKeyVersion]);
       const combined = new Uint8Array(1 + iv.byteLength + ciphertext.byteLength);
       combined.set(versionByte, 0);
       combined.set(iv, 1);
       combined.set(ciphertext, 1 + iv.byteLength);
 
-      let audioCID: string;
-      let audioStreamId: string | undefined;
-      let metadataCID: string;
-      let metadataStreamId: string | undefined;
+      let storedCID: string;
+      let storedStreamId: string | undefined;
 
-      // 3) Store encrypted audio
+      // 3) Store encrypted blob
       if (storageMode === "ipfs" && this.localStorageEnabled) {
-        const ipfsAudioCID = await this.fs.addBytes(combined);
-        audioCID = ipfsAudioCID.toString();
+        const ipfsCID = await this.fs.addBytes(combined);
+        storedCID = ipfsCID.toString();
       } else {
-        audioStreamId = uuidv4();
-        audioCID = `stream-${audioStreamId}`;
-        this.streamingFiles.set(audioStreamId, combined);
-        this.announceStream(audioStreamId, file.name, file.size);
+        storedStreamId = uuidv4();
+        storedCID = `stream-${storedStreamId}`;
+        this.streamingFiles.set(storedStreamId, combined);
+        this.announceStream(storedStreamId, file.name, file.size);
       }
 
       // 4) Let plugins add metadata
       let finalMetadata: any = {};
       const pluginMetadata = await this.pluginManager.enhanceFileMetadata(file);
-      finalMetadata = { ...this.extractMetadata(file), ...pluginMetadata };
+      finalMetadata = { ...pluginMetadata };
 
-      // Override with any user-provided metadata
       if (metadata) {
         finalMetadata = { ...finalMetadata, ...metadata };
       }
@@ -613,13 +841,14 @@ export class Vinyl {
         size: file.size,
         type: file.type,
         uploadDate: new Date().toISOString(),
-        audioCID,
-        audioStreamId,
         storageMode,
+        storedCID,
         metadata: finalMetadata,
       };
 
-      // 6) Store metadata JSON (either IPFS or in-memory)
+      // 6) Store metadata JSON on Helia or in‐memory
+      let metadataCID: string;
+      let metadataStreamId: string | undefined;
       if (storageMode === "ipfs" && this.localStorageEnabled) {
         const metadataBytes = new TextEncoder().encode(JSON.stringify(metadataObject));
         const ipfsMetadataCID = await this.fs.addBytes(metadataBytes);
@@ -631,7 +860,7 @@ export class Vinyl {
         this.streamingFiles.set(metadataStreamId, metadataBytes);
       }
 
-      // 7) Construct FileInfo, store locally, notify plugins, and emit event
+      // 7) Construct FileInfo, persist in LevelDB, notify plugins, emit event
       const fileInfo: FileInfo = {
         cid: metadataCID,
         name: file.name,
@@ -641,17 +870,19 @@ export class Vinyl {
         encrypted: true,
         storageMode,
         streamId: metadataStreamId,
-        audioCID,
-        audioStreamId,
         pinned: false,
         shareLink: this.generateShareLink(metadataCID, storageMode),
         metadata: finalMetadata,
       };
 
-      this.files.set(metadataCID, fileInfo);
-      this.pluginManager.notifyFileUploaded(metadataCID, fileInfo);
-      this.emit("fileUploaded", { source: "vinyl", payload: { cid: metadataCID, fileInfo } });
+      // Persist into LevelDB
+      await this.fileDb.put(metadataCID, fileInfo);
 
+      this.pluginManager.notifyFileUploaded(metadataCID, fileInfo);
+      this.emit("fileUploaded", {
+        source: "vinyl",
+        payload: { cid: metadataCID, fileInfo },
+      });
       return metadataCID;
     } catch (error: any) {
       console.error("Vinyl: Failed to upload file:", error);
@@ -662,53 +893,17 @@ export class Vinyl {
 
   /**
    * Generate a shareable URI for the file:
-   *  - For IPFS storage: "vinyl://ipfs/<cid>"
-   *  - For P2P streaming:  "vinyl://stream/<cid>"
+   *  - IPFS: "vinyl://ipfs/<cid>"
+   *  - P2P streaming: "vinyl://stream/<cid>"
    */
   private generateShareLink(cid: string, storageMode: StorageMode): string {
-    if (storageMode === "ipfs") {
-      return `vinyl://ipfs/${cid}`;
-    } else {
-      return `vinyl://stream/${cid}`;
-    }
-  }
-
-  /**
-   * Basic metadata extraction from filename (for .audio files):
-   *  - Expect "Artist - Title" or "Artist - Album - Title"
-   *  - Extract genre = "Unknown" by default
-   */
-  private extractMetadata(file: UploadFile): any {
-    const metadata: any = {};
-    if (file.type.startsWith("audio/")) {
-      const baseName = file.name.replace(/\.[^/.]+$/, "");
-      const parts = baseName.split(" - ");
-      if (parts.length >= 2) {
-        metadata.artist = parts[0].trim();
-        metadata.title = parts[1].trim();
-      } else {
-        metadata.title = baseName;
-      }
-      metadata.genre = "Unknown";
-    }
-    return metadata;
-  }
-
-  /**
-   * Announce a new P2P streaming file:
-   * In a real system, this could publish a pubsub message. Here we simply log.
-   */
-  private announceStream(streamId: string, fileName: string, fileSize: number): void {
-    console.log(
-      `Vinyl: announcing stream "${fileName}" (size: ${fileSize}) → streamId="${streamId}"`,
-    );
+    return storageMode === "ipfs" ? `vinyl://ipfs/${cid}` : `vinyl://stream/${cid}`;
   }
 
   /**
    * Download a file by CID:
-   * 1) If it's a metadataCID, resolve to audioCID
-   * 2) If audioCID starts with "stream-", read encrypted bytes from memory → decrypt → return
-   * 3) Otherwise (IPFS): cat bytes via Helia → decrypt → return
+   * 1) If this is a metadataCID (exists in fileDb), return raw metadata JSON bytes.
+   * 2) Otherwise (encrypted payload), fetch+decrypt and return decrypted bytes.
    * On success, notify plugins via notifyFileDownloaded and emit "fileDownloaded".
    */
   async downloadFile(cid: string): Promise<Uint8Array | null> {
@@ -719,57 +914,61 @@ export class Vinyl {
         throw new Error("Encryption key is not initialized");
       }
 
-      // 1) Check if this is a metadataCID (local map contains FileInfo)
-      const fileInfo = this.files.get(cid);
-      let targetCID = cid;
-
-      if (fileInfo && fileInfo.audioCID) {
-        // We found a FileInfo → extract audioCID
-        targetCID = fileInfo.audioCID;
-        console.log(`Vinyl: resolved metadata CID → audioCID "${targetCID}"`);
-      } else if (cid.startsWith("metadata-")) {
-        // It's a streaming metadata ID (in-memory JSON), return raw metadata bytes
-        const metadataStreamId = cid.replace(/^metadata-/, "");
-        const metadataBytes = this.streamingFiles.get(metadataStreamId);
-        if (!metadataBytes) {
-          console.warn(`Vinyl: no streaming metadata for ID "${metadataStreamId}"`);
-          return null;
+      // 1) Check if this is a metadataCID (levelDB contains FileInfo)
+      let fileInfo: FileInfo | null = null;
+      try {
+        fileInfo = await this.fileDb.get(cid);
+      } catch {
+        // not in LevelDB
+      }
+      if (fileInfo) {
+        // It’s a metadata JSON blob
+        if (fileInfo.storageMode === "ipfs") {
+          const catStream = this.fs.cat(cid);
+          const chunks: Uint8Array[] = [];
+          for await (const chunk of catStream) {
+            chunks.push(chunk);
+          }
+          const all = chunks.flatMap((c) => Array.from(c));
+          return new Uint8Array(all);
+        } else {
+          const metadataStreamId = fileInfo.streamId!;
+          const metadataBytes = this.streamingFiles.get(metadataStreamId);
+          if (!metadataBytes) {
+            console.warn(`Vinyl: no streaming metadata for ID "${metadataStreamId}"`);
+            return null;
+          }
+          return metadataBytes;
         }
-        return metadataBytes;
       }
 
-      // 2) Now handle the actual audio piece
-      if (targetCID.startsWith("stream-")) {
-        // In-memory encrypted bytes
-        const streamId = targetCID.replace(/^stream-/, "");
-        const encryptedData = this.streamingFiles.get(streamId);
+      // 2) Otherwise, it’s a raw encrypted blob
+      let encryptedData: Uint8Array | undefined;
+      if (cid.startsWith("stream-")) {
+        const streamId = cid.replace(/^stream-/, "");
+        encryptedData = this.streamingFiles.get(streamId);
         if (!encryptedData) {
           console.warn(`Vinyl: streaming audio "${streamId}" not found locally`);
           throw new Error("Stream not available");
         }
-        const decrypted = await this.decryptFileData(encryptedData);
-        this.pluginManager.notifyFileDownloaded(cid);
-        return decrypted;
       } else {
-        // 3) IPFS retrieval via Helia
+        // IPFS retrieval via Helia
         if (!this.localStorageEnabled || !this.fs) {
           throw new Error("Local IPFS storage is disabled");
         }
-
-        const catStream = this.fs.cat(targetCID);
+        const catStream = this.fs.cat(cid);
         const chunks: Uint8Array[] = [];
         for await (const chunk of catStream) {
           chunks.push(chunk);
         }
-
-        // Concatenate chunks into one Uint8Array
-        const combined = new Uint8Array(
-          chunks.reduce((acc, c) => acc.concat(Array.from(c)), [] as number[]),
-        );
-        const decrypted = await this.decryptFileData(combined);
-        this.pluginManager.notifyFileDownloaded(cid);
-        return decrypted;
+        const all = chunks.flatMap((c) => Array.from(c));
+        encryptedData = new Uint8Array(all);
       }
+
+      // 3) Decrypt
+      const decrypted = await this.decryptFileData(encryptedData!);
+      this.pluginManager.notifyFileDownloaded(cid);
+      return decrypted;
     } catch (error: any) {
       console.error("Vinyl: Failed to download file:", error);
       this.emit("error", { source: "vinyl", payload: { error: error.message } });
@@ -778,11 +977,10 @@ export class Vinyl {
   }
 
   /**
-   * Decrypt a Uint8Array that was encrypted via AES‐GCM (with version+IV prefix).
-   * Returns the raw decrypted bytes.
+   * Decrypt a Uint8Array that was encrypted via AES‐GCM:
+   * format = [version(1) | IV(12) | ciphertext…].
    */
   private async decryptFileData(encryptedData: Uint8Array): Promise<Uint8Array> {
-    // 1) Extract version (first byte), IV (next 12 bytes), and ciphertext
     const version = encryptedData[0];
     const key = this.cryptoKeys.get(version);
     if (!key) {
@@ -791,17 +989,25 @@ export class Vinyl {
     const iv = encryptedData.slice(1, 13);
     const ciphertext = encryptedData.slice(13);
 
-    // 2) Decrypt via Web Crypto
-    const decryptedBuffer = await (this.isBrowser()
-      ? window.crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext)
-      : crypto.webcrypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext));
+    const decryptedBuffer = this.isBrowser()
+      ? await window.crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext)
+      : await crypto.webcrypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
 
     return new Uint8Array(decryptedBuffer);
   }
 
   /**
+   * Announce a new P2P streaming file.
+   */
+  private announceStream(streamId: string, fileName: string, fileSize: number): void {
+    console.log(
+      `Vinyl: announcing stream "${fileName}" (size: ${fileSize}) → streamId="${streamId}"`,
+    );
+  }
+
+  /**
    * Pin a file in Helia/IPFS; update FileInfo & emit "filePinned".
-   * - If localStorage is disabled, throws an error.
+   * If localStorage is disabled, throws an error.
    */
   async pinFile(cid: string): Promise<void> {
     try {
@@ -811,11 +1017,16 @@ export class Vinyl {
       await this.helia.pins.add(cid);
       this.pinnedFiles.add(cid);
 
-      // Update FileInfo.pinned = true
-      const fi = this.files.get(cid);
+      // Update FileInfo.pinned = true in LevelDB
+      let fi: FileInfo | null = null;
+      try {
+        fi = await this.fileDb.get(cid);
+      } catch {
+        // not in DB
+      }
       if (fi) {
         fi.pinned = true;
-        this.files.set(cid, fi);
+        await this.fileDb.put(cid, fi);
       }
 
       this.emit("filePinned", { source: "vinyl", payload: { cid } });
@@ -837,7 +1048,7 @@ export class Vinyl {
 
   /**
    * Unpin a file in Helia/IPFS; update FileInfo & emit "fileUnpinned".
-   * - If localStorage is disabled, throws an error.
+   * If localStorage is disabled, throws an error.
    */
   async unpinFile(cid: string): Promise<void> {
     try {
@@ -847,11 +1058,16 @@ export class Vinyl {
       await this.helia.pins.rm(cid);
       this.pinnedFiles.delete(cid);
 
-      // Update FileInfo.pinned = false
-      const fi = this.files.get(cid);
+      // Update FileInfo.pinned = false in LevelDB
+      let fi: FileInfo | null = null;
+      try {
+        fi = await this.fileDb.get(cid);
+      } catch {
+        // not in DB
+      }
       if (fi) {
         fi.pinned = false;
-        this.files.set(cid, fi);
+        await this.fileDb.put(cid, fi);
       }
 
       this.emit("fileUnpinned", { source: "vinyl", payload: { cid } });
@@ -872,25 +1088,52 @@ export class Vinyl {
   }
 
   /**
+   * Set up libp2p event listeners for peer connect/disconnect,
+   * then notify plugins and emit our own events.
+   */
+  private setupEventListeners(): void {
+    if (!this.libp2p) return;
+
+    this.libp2p.addEventListener("peer:connect", (evt: any) => {
+      const peerId = evt.detail.toString();
+      const peerInfo: PeerInfo = {
+        id: peerId,
+        address: "unknown",
+        status: "connected",
+        lastSeen: new Date(),
+      };
+      this.peers.set(peerId, peerInfo);
+      this.pluginManager.notifyPeerConnected(peerId, peerInfo);
+      this.emit("peerConnected", { source: "vinyl", payload: { peerId } });
+    });
+
+    this.libp2p.addEventListener("peer:disconnect", (evt: any) => {
+      const peerId = evt.detail.toString();
+      const pi = this.peers.get(peerId);
+      if (pi) {
+        pi.status = "disconnected";
+        this.peers.set(peerId, pi);
+        this.pluginManager.notifyPeerDisconnected(peerId, pi);
+      }
+      this.emit("peerDisconnected", { source: "vinyl", payload: { peerId } });
+    });
+  }
+
+  /**
    * Return aggregated node statistics for monitoring:
-   *  - id, isOnline, peer counts, file counts, storage usage, etc.
+   *  - id, isOnline, peer counts, file counts, etc.
    */
   getNodeStats(): NodeStats {
     const connectedPeers = Array.from(this.peers.values()).filter((p) => p.status === "connected");
-    const musicPeers = Array.from(this.peers.values()).filter(
-      (p) => p.status === "connected" && p.isMusicNode,
-    );
-
     return {
       id: this.libp2p?.peerId?.toString() || this.nodeId,
       isOnline: this.libp2p?.isStarted === true,
       connectedPeers: connectedPeers.length,
       totalPeers: this.peers.size,
-      uploadedFiles: this.files.size,
-      downloadedFiles: 0, // Could track this if desired
-      storageUsed: this.localStorageEnabled ? 0 : -1, // Placeholder
-      storageAvailable: this.localStorageEnabled ? 1000 * 1024 * 1024 : 0, // Placeholder
-      musicPeers: musicPeers.length,
+      uploadedFiles: 0, // could increment on upload
+      downloadedFiles: 0, // track if needed
+      storageUsed: this.localStorageEnabled ? 0 : -1,
+      storageAvailable: this.localStorageEnabled ? 1000 * 1024 * 1024 : 0,
       pinnedFiles: this.pinnedFiles.size,
     };
   }
@@ -900,25 +1143,28 @@ export class Vinyl {
     return Array.from(this.peers.values());
   }
 
-  /** Return a snapshot list of local FileInfo for all uploaded files. */
-  getFiles(): FileInfo[] {
-    return Array.from(this.files.values());
+  /** Return a snapshot list of local FileInfo (reads from fileDb). */
+  async getFiles(): Promise<FileInfo[]> {
+    const files: FileInfo[] = [];
+    for await (const [, info] of this.fileDb.iterator()) {
+      files.push(info);
+    }
+    return files;
   }
 
-  /** Return a snapshot list of NetworkFileInfo for all known network‐advertised files. */
+  /** Return a snapshot list of NetworkFileInfo for known network‐advertised files. */
   getNetworkFiles(): NetworkFileInfo[] {
     return Array.from(this.networkFiles.values());
   }
 
   /**
-   * Subscribe to node-level events (“peerConnected”, “fileUploaded”, plugin events, etc.).
-   * Callbacks receive (eventName, envelope).
+   * Subscribe to node‐level events.
    */
   public on(callback: (event: string, envelope: { source: string; payload: any }) => void): void {
     this.listeners.push(callback);
   }
 
-  /** Alias for `on(...)` so that older code using `onEvent(...)` still works. */
+  /** Alias for `on(...)`. */
   public onEvent(
     callback: (event: string, envelope: { source: string; payload: any }) => void,
   ): void {
@@ -926,11 +1172,9 @@ export class Vinyl {
   }
 
   /**
-   * PUBLIC EMIT: call every registered listener with (eventName, envelope).
-   * Plugins and external code rely on this to receive node and plugin events.
+   * PUBLIC EMIT: call all listeners with (eventName, envelope).
    */
   public emit(event: string, envelope: { source?: string; payload: any }): void {
-    // If plugins call this, "source" may be missing – wrap it if needed
     if (!envelope.source) {
       envelope.source = "vinyl";
     }
@@ -942,9 +1186,16 @@ export class Vinyl {
       try {
         listener(event, envelope as { source: string; payload: any });
       } catch {
-        // Ignore errors in individual listeners
+        // ignore listener errors
       }
     }
+  }
+
+  /**
+   * Return the PluginManager so external code can query installed plugins.
+   */
+  getPluginManager(): PluginManager {
+    return this.pluginManager;
   }
 
   /**
@@ -964,7 +1215,7 @@ export class Vinyl {
       timestamp: new Date().toISOString(),
       event: "nodeStopped",
       plugin: "core",
-      details: { nodeId: this.libp2p?.peerId.toString() || this.nodeId },
+      details: { nodeId: this.libp2p?.peerId?.toString() || this.nodeId },
     });
   }
 }
