@@ -1,0 +1,37 @@
+{
+  "name": "vinyl-peer-plugin-rs",
+  "version": "0.0.1",
+  "authors": [
+    "KDLabs"
+  ],
+  "type": "module",
+  "module": "dist/esm/index.js",
+  "types": "dist/esm/index.d.ts",
+  "exports": {
+    "import": "./dist/esm/index.js"
+  },
+  "scripts": {
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build": "rimraf dist && npm run build:esm",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@helia/unixfs": "^5.0.3",
+    "@ronomon/reed-solomon": "^6.0.0",
+    "@types/multer": "^1.4.7",
+    "express": "^5.1.0",
+    "helia": "^5.4.2",
+    "level": "^10.0.0",
+    "multer": "^1.4.5-lts.1",
+    "multiformats": "^13.3.6",
+    "uuid": "^11.1.0",
+    "vinyl-peer-protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.2",
+    "@types/node": "^18.7.23",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

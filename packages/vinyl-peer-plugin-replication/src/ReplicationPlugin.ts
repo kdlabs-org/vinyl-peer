@@ -1,35 +1,31 @@
 import express, { Router } from "express";
-import {
-  BasePlugin,
-  PluginCapabilities,
-  PluginContext,
-  VinylPeerPlugin,
-} from "vinyl-peer-protocol";
+import { BasePlugin } from "vinyl-peer-protocol";
 
-interface ReplicationOptions {
-  autoPinLocal?: boolean; // pin when *this* node downloads
-  autoPinRemote?: boolean; // pin when *other* nodes announce
-  topic?: string; // pubsub topic (defaults to "vinyl:replicate")
-}
-
-export class ReplicationPlugin extends BasePlugin implements VinylPeerPlugin {
-  protected context!: PluginContext;
-  private enabled: boolean = true;
-  private readonly TOPIC: string;
+export class ReplicationPlugin extends BasePlugin {
+  private enabled: boolean;
   private autoPinLocal: boolean;
   private autoPinRemote: boolean;
+  private TOPIC: string;
+  protected context!: any;
 
-  constructor(opts: ReplicationOptions = {}) {
+  constructor(
+    opts: {
+      autoPinLocal?: boolean;
+      autoPinRemote?: boolean;
+      topic?: string;
+    } = {},
+  ) {
     super();
+    this.enabled = true;
     this.autoPinLocal = opts.autoPinLocal ?? true;
     this.autoPinRemote = opts.autoPinRemote ?? true;
     this.TOPIC = opts.topic ?? "vinyl:replicate";
   }
 
-  getCapabilities(): PluginCapabilities {
+  getCapabilities() {
     return {
-      name: "vinyl-peer-replication-plugin",
-      version: "1.0.0",
+      name: "vinyl-peer-plugin-replication",
+      version: "0.0.1",
       protocols: [],
       capabilities: ["replication"],
       fileTypes: [],
@@ -42,78 +38,93 @@ export class ReplicationPlugin extends BasePlugin implements VinylPeerPlugin {
     };
   }
 
-  async initialize(context: PluginContext): Promise<boolean> {
+  async initialize(context: any): Promise<boolean> {
     const ok = await super.initialize(context);
     if (!ok) return false;
     this.context = context;
+    return true;
+  }
 
-    // Only subscribe to remote‐replicate messages if configured:
+  /**
+   * Now that libp2p is started, we can safely subscribe to pubsub.
+   */
+  async start(): Promise<void> {
+    await super.start();
+
     if (this.autoPinRemote) {
       try {
-        await this.context.libp2p.pubsub.subscribe(this.TOPIC);
-        this.context.libp2p.pubsub.addEventListener("message", (evt: any) => {
+        // In recent libp2p, the pubsub service is under libp2p.services.pubsub
+        const pubsub = this.context.libp2p.services.pubsub;
+        if (!pubsub) {
+          throw new Error("ReplicationPlugin: pubsub service is not available on libp2p");
+        }
+
+        // Subscribe to the replication topic
+        await pubsub.subscribe(this.TOPIC);
+        pubsub.addEventListener("message", (evt: any) => {
           if (evt.detail.topic !== this.TOPIC) return;
+
           try {
             const msg = JSON.parse(new TextDecoder().decode(evt.detail.data));
             if (msg.type === "replicate" && this.enabled) {
               const cid = msg.cid as string;
-              // If we already have it, skip:
+              // If we don’t already have this file locally, pin it
               if (!this.context.files.has(cid)) {
-                this.context.pinFile(cid).catch((err) => {
+                this.context.pinFile(cid).catch((err: any) => {
                   console.error(`ReplicationPlugin: failed to pin ${cid}:`, err);
                 });
               }
             }
           } catch {
-            /* ignore invalid JSON */
+            // Ignore invalid JSON
           }
         });
-      } catch (err: any) {
-        console.error("ReplicationPlugin: could not subscribe to replication topic:", err);
+      } catch (err) {
+        console.error("ReplicationPlugin: kon niet subscriben op replication topic:", err);
       }
     }
-
-    return true;
   }
 
-  /**
-   * No libp2p protocols to set up, so this is a no‐op.
-   */
+  async stop(): Promise<void> {
+    // (Optionally you could “unsubscribe,” but libp2p’s current pubsub API doesn’t expose an unsubscribe call.)
+    this.enabled = false;
+    await super.stop();
+  }
+
   setupProtocols(): void {
-    // no‐op
+    // no custom libp2p-protocols here
   }
 
-  /**
-   * Required by BasePlugin/VinylPeerPlugin interface, but unused here.
-   */
-  async handleProtocol(protocol: string, stream: any, peerId: string): Promise<void> {
-    // no‐op
+  async handleProtocol(protocol: string, stream: any, peerId: string) {
+    // no custom protocol handler
   }
 
-  onFileDownloaded?(cid: string): void {
-    // Only auto‐pin locally if configured:
+  onFileDownloaded(cid: string): void {
+    // 1) If autoPinLocal is on, pin locally
     if (this.autoPinLocal && this.enabled) {
       this.context
         .pinFile(cid)
-        .then(() => {
-          console.log(`ReplicationPlugin: automatically pinned "${cid}".`);
-        })
-        .catch((err) => {
-          console.error(`ReplicationPlugin: failed to pin "${cid}":`, err);
-        });
+        .then(() => console.log(`ReplicationPlugin: automatisch gepinned "${cid}".`))
+        .catch((err: any) => console.error(`ReplicationPlugin: kon niet pinnen "${cid}":`, err));
     }
 
-    // Only broadcast to remote peers if configured:
+    // 2) If autoPinRemote is on, broadcast to peers so they can pin as well
     if (this.autoPinRemote && this.enabled) {
+      const pubsub = this.context.libp2p.services.pubsub;
+      if (!pubsub) {
+        console.error("ReplicationPlugin: pubsub service unavailable when broadcasting");
+        return;
+      }
+
       const payload = JSON.stringify({ type: "replicate", cid });
-      this.context.libp2p.pubsub
+      pubsub
         .publish(this.TOPIC, new TextEncoder().encode(payload))
         .catch((e: any) => console.error("ReplicationPlugin: pubsub error:", e));
     }
   }
 
   getHttpNamespace(): string {
-    return "/replication";
+    return "/api/replication";
   }
 
   getHttpRouter(): Router {

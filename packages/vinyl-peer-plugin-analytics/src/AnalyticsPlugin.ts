@@ -24,8 +24,8 @@ export class AnalyticsPlugin extends BasePlugin implements VinylPeerPlugin {
   /** Identify plugin; no libp2p protocols needed here. */
   getCapabilities(): PluginCapabilities {
     return {
-      name: "vinyl-peer-analytics",
-      version: "1.0.0",
+      name: "vinyl-peer-plugin-analytics",
+      version: "0.0.1",
       protocols: [], // No custom libp2p protocols
       capabilities: ["analytics"],
       fileTypes: [],

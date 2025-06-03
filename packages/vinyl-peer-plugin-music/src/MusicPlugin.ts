@@ -22,8 +22,8 @@ export class MusicPlugin extends BasePlugin implements VinylPeerPlugin {
   /** Declare plugin identity, supported protocols, capabilities, file types, and permissions. */
   getCapabilities(): PluginCapabilities {
     return {
-      name: "vinyl-peer-music-plugin",
-      version: "1.0.0",
+      name: "vinyl-peer-plugin-music",
+      version: "0.0.1",
       protocols: [
         "/music-discovery/1.0.0",
         "/music-recommendations/1.0.0",

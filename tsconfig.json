@@ -17,7 +17,9 @@
       "vinyl-peer-cli": ["vinyl-peer-cli/dist"],
       "vinyl-peer-plugin-music": ["vinyl-peer-plugin-music/dist"],
       "vinyl-peer-plugin-analytics": ["vinyl-peer-plugin-analytics/dist"],
-      "vinyl-peer-plugin-replication": ["vinyl-peer-plugin-replication/dist"]
+      "vinyl-peer-plugin-replication": ["vinyl-peer-plugin-replication/dist"],
+      "vinyl-peer-plugin-rs": ["vinyl-peer-plugin-rs/dist"],
+      "vinyl-peer-plugin-sdk-generator": ["vinyl-peer-plugin-sdk-generator/dist"],
     },
     "declaration": true
   },

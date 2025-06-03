@@ -1,4 +1,3 @@
-// src/Vinyl.ts
 import { createLibp2p } from "libp2p";
 import { webSockets } from "@libp2p/websockets";
 import { webRTC } from "@libp2p/webrtc";
@@ -505,6 +504,10 @@ export class Vinyl {
         pinFile: this.pinFile.bind(this),
         unpinFile: this.unpinFile.bind(this),
         getPermissions: () => this.nodePermissions,
+        helia: this.helia!,
+        fileDb: this.fileDb!,
+        pluginManager: this.pluginManager,
+        httpApp: this.httpApp,
       };
       this.pluginManager.setContext(pluginContext);
 

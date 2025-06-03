@@ -1,4 +1,8 @@
 import type { Application, Router } from "express";
+import { Level } from "level";
+import { Helia } from "helia";
+import type { PluginManager } from "./PluginManager.js";
+import type { Express } from "express";
 
 /**
  * PeerInfo: Basic information about a peer in the network.
@@ -103,6 +107,10 @@ export interface PluginContext {
 
   /** Retrieve this plugin’s permissions. */
   getPermissions: () => PluginPermissions;
+  fileDb: Level<string, FileInfo>;
+  helia: Helia;
+  pluginManager: PluginManager;
+  httpApp?: Express;
 }
 
 /**
