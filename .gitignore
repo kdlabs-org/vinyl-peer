@@ -22,3 +22,4 @@ pnpm-debug.log*
 
 # Optional: VS Code
 .vscode/
+rs-manifest
