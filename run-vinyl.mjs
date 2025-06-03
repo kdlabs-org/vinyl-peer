@@ -35,9 +35,9 @@ async function main() {
 
   //  —— Now that all core‐routes and plugin‐routes are fully in httpApp._router.stack,
   //      register-and-start the SDK generator so it will see **every** route:
-  // const sdkPlugin = new SdkGeneratorPlugin({ outputDir: "generated-sdk" });
-  // await vinyl.getPluginManager().registerPlugin(sdkPlugin);
-  // await sdkPlugin.start();
+  const sdkPlugin = new SdkGeneratorPlugin({ outputDir: "generated-sdk" });
+  await vinyl.getPluginManager().registerPlugin(sdkPlugin);
+  await sdkPlugin.start();
   console.log("✅ SDK generated in ./generated-sdk");
 
   // 4) Wire up a console‐logger for every Vinyl event, and graceful shutdown
