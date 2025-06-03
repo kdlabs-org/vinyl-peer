@@ -3,7 +3,7 @@ import { MusicPlugin } from "./packages/vinyl-peer-plugin-music/dist/esm/index.j
 import { AnalyticsPlugin } from "./packages/vinyl-peer-plugin-analytics/dist/esm/index.js";
 import { ReplicationPlugin } from "./packages/vinyl-peer-plugin-replication/dist/esm/index.js";
 import { ReedSolomonPlugin } from "./packages/vinyl-peer-plugin-rs/dist/esm/index.js";
-// import { SdkGeneratorPlugin } from "./packages/vinyl-peer-plugin-sdk-generator/dist/esm/index.js";
+import { SdkGeneratorPlugin } from "./packages/vinyl-peer-plugin-sdk-generator/dist/esm/index.js";
 
 async function main() {
   // 1) Instantiate Vinyl with only the “normal” plugins (no SDK‐generator yet)
