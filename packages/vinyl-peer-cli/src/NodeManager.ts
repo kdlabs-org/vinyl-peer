@@ -1,7 +1,7 @@
 import { Vinyl, NodeStats, PeerInfo, StorageMode, NetworkFileInfo } from "vinyl-peer-protocol";
 import * as fs from "fs";
 import * as path from "path";
-import { NodeFile } from "./Node.js"; // <-- Use NodeFile instead of browser File
+import { NodeFile } from "./Node.js";
 
 export class NodeManager {
   private nodeService: Vinyl;

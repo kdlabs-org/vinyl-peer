@@ -7,7 +7,7 @@ import { AnalyticsPlugin } from "vinyl-peer-plugin-analytics";
 import mime from "mime-types";
 import { NodeManager } from "./NodeManager.js";
 import { NodeFile } from "./Node.js";
-import { WebServer } from "./WebServer.js";
+
 const program = new Command();
 
 /**
@@ -23,15 +23,11 @@ class CLIManager {
 
   /**
    * Start the node with the given plugins and local‐storage option.
-   * Previously, Vinyl’s constructor accepted a plugin array. We now must:
    * 1) Create a new Vinyl()
    * 2) Initialize it
-   * 3) After initialization, register & start each plugin manually
+   * 3) Register & start each plugin manually
    */
-  async start(
-    plugins: Array<MusicPlugin | AnalyticsPlugin>,
-    enableLocalStorage: boolean,
-  ): Promise<boolean> {
+  async start(plugins: VinylPeerPlugin[], enableLocalStorage: boolean): Promise<boolean> {
     // 1) Instantiate Vinyl without arguments
     this.vinyl = new Vinyl();
 
@@ -43,14 +39,13 @@ class CLIManager {
 
     // 3) Register each plugin with the PluginManager, then start them
     const pluginManager = this.vinyl.getPluginManager();
-    for (const plugin of plugins as VinylPeerPlugin[]) {
+    for (const plugin of plugins) {
       await pluginManager.registerPlugin(plugin);
     }
     await pluginManager.startAllPlugins();
 
     // 4) Create NodeManager wrapper that relies on vinyl having been initialized
     this.nodeManager = new NodeManager(this.vinyl as any);
-
     return true;
   }
 
@@ -121,29 +116,52 @@ class CLIManager {
 program.name("vinyl-peer").description("Vinyl Peer – P2P Music Sharing Network").version("1.0.0");
 
 /**
+ * Helper: given a comma-separated list of plugin names, return instances.
+ * Currently recognizes "music" and "analytics".
+ */
+function instantiatePlugins(list: string): VinylPeerPlugin[] {
+  const names = list.split(",").map((s) => s.trim().toLowerCase());
+  const result: VinylPeerPlugin[] = [];
+
+  for (const name of names) {
+    if (name === "music") {
+      result.push(new MusicPlugin());
+    } else if (name === "analytics") {
+      result.push(new AnalyticsPlugin());
+    } else if (name === "") {
+      // skip empty entries
+    } else {
+      console.warn(`Warning: unrecognized plugin "${name}" – ignoring.`);
+    }
+  }
+
+  return result;
+}
+
+/**
  * `start` command:
  *   - --no-local-storage: run as relay-only (no IPFS)
- *   - --web-server: start Express WebServer op port 3001
+ *   - -p, --plugins <list>: comma-separated plugin names (e.g. "music,analytics")
+ *     Default: "music,analytics"
  */
 program
   .command("start")
   .description("Start the Vinyl Peer node")
   .option("--no-local-storage", "Disable local IPFS storage (relay-only mode)")
-  .option("--web-server", "Start the web server for browser interface")
+  .option(
+    "-p, --plugins <list>",
+    "Comma-separated list of plugins to load (music,analytics)",
+    "music,analytics",
+  )
   .action(async (options) => {
     console.log("🎵 Starting Vinyl Peer node...");
     const cliManager = new CLIManager();
 
-    try {
-      // Maak plugin‐instanties
-      const musicPlugin = new MusicPlugin();
-      const analyticsPlugin = new AnalyticsPlugin();
+    // Parse plugin list and instantiate
+    const pluginList = instantiatePlugins(options.plugins as string);
 
-      // Start Vinyl met beide plugins
-      const success = await cliManager.start(
-        [musicPlugin, analyticsPlugin],
-        options.localStorage !== false,
-      );
+    try {
+      const success = await cliManager.start(pluginList, options.localStorage !== false);
       if (!success) {
         console.error("❌ Failed to start node");
         process.exit(1);
@@ -151,14 +169,6 @@ program
 
       console.log("✅ Node started successfully!");
       console.log(`📋 Node ID: ${cliManager.getNodeId()}`);
-
-      // Optioneel: start WebServer
-      let webServer: WebServer | null = null;
-      if (options.webServer) {
-        webServer = new WebServer(cliManager.vinyl);
-        await webServer.start();
-        console.log("🌐 Web server started at http://localhost:3001");
-      }
 
       // Log alle node+plugin events naar console
       cliManager.onEvent((evt, data) => {
@@ -168,9 +178,6 @@ program
       // Houd de process alive tot SIGINT
       process.on("SIGINT", async () => {
         console.log("\n🛑 Shutting down...");
-        if (webServer) {
-          await webServer.stop();
-        }
         await cliManager.stop();
         process.exit(0);
       });
@@ -182,7 +189,7 @@ program
 
 /**
  * `upload <file>`: upload een bestand vanaf schijf.
- *  -o, --storage-mode <ipfs|p2p-stream> (default: ipfs)
+ *  - -s, --storage-mode <mode> (default: ipfs)
  */
 program
   .command("upload <file>")
