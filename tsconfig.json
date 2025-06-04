@@ -20,6 +20,7 @@
       "vinyl-peer-plugin-replication": ["vinyl-peer-plugin-replication/dist"],
       "vinyl-peer-plugin-rs": ["vinyl-peer-plugin-rs/dist"],
       "vinyl-peer-plugin-sdk-generator": ["vinyl-peer-plugin-sdk-generator/dist"],
+      "vinyl-peer-plugin-v": ["vinyl-peer-plugin-v/dist"],
     },
     "declaration": true
   },

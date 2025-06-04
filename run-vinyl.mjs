@@ -4,6 +4,7 @@ import { AnalyticsPlugin } from "./packages/vinyl-peer-plugin-analytics/dist/esm
 import { ReplicationPlugin } from "./packages/vinyl-peer-plugin-replication/dist/esm/index.js";
 import { ReedSolomonPlugin } from "./packages/vinyl-peer-plugin-rs/dist/esm/index.js";
 import { SdkGeneratorPlugin } from "./packages/vinyl-peer-plugin-sdk-generator/dist/esm/index.js";
+import { VPlugin } from "./packages/vinyl-peer-plugin-v/dist/esm/VPlugin.js";
 
 async function main() {
   // 1) Instantiate Vinyl with only the “normal” plugins (no SDK‐generator yet)
@@ -11,7 +12,8 @@ async function main() {
     new MusicPlugin(),
     new AnalyticsPlugin(),
     new ReplicationPlugin(),
-    new ReedSolomonPlugin(),  // if you ever want RS‐encoding/decoding, uncomment
+    new ReedSolomonPlugin(),
+    new VPlugin()
   ]);
 
   // 2) Initialize (this starts libp2p, Helia, plugin.initialize + plugin.start() for each)

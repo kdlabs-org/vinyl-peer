@@ -1,0 +1,138 @@
+5. Scheduled Backup & Archival Plugin
+Goal: Automatically back up pinned files to a long‐term storage location (e.g. a remote IPFS gateway or another Vinyl node) on a scheduled cadence.
+
+Key Capabilities
+
+Configurable Schedule: Administrator sets cron‐like backup times (e.g. daily at 02:00 AM).
+
+Backup Target: Could be another peer endpoint (via HTTP POST /api/upload) or an external IPFS HTTP API (/api/v0/add).
+
+File Selection: Back up only those files where fileInfo.pinned === true (or those older than X days).
+
+Backup Metadata: Maintain a backupDb in LevelDB that records { cid, backupTimestamp, targetLocation } so you don’t redundantly back up the same CID more than once per day/week.
+
+HTTP Endpoints:
+
+POST /api/backup/start → immediately trigger a backup job.
+
+GET /api/backup/status → shows “last backup time,” “files pending,” “files succeeded/failed.”
+
+DELETE /api/backup/:cid → remove that file from the backup queue.
+
+Integration Points
+
+Schedule with setInterval or a lightweight cron library inside the plugin’s start() method.
+
+For each file returned by context.files.values() that matches backup criteria, do a Virtual “upload” to your backup target: e.g. if the target is another Vinyl node, call context.libp2p.dialProtocol(peerId, "/vinyl-network/upload"); if the target is an HTTP IPFS API, do fetch("http://gateway:5001/api/v0/add", formData).
+
+Error Handling: If a backup fails, keep it in a “retry” queue for N attempts.
+
+Why It’s Useful
+
+Ensures that any peer’s pinned content is safely archived elsewhere, protecting against data loss if the peer goes offline or their disk fails.
+
+In research or enterprise settings, it automates “compliance backups” so you always have a multi‐node or offsite copy.
+
+_
+
+2. Bandwidth Throttling & Prioritization Plugin
+Goal: Allow each peer to set global or per‐file bandwidth limits, or prioritize certain streams (e.g. give live streaming higher priority, background uploads lower).
+
+Key Capabilities
+
+Rate Limiter: Wrap all outgoing/incoming streaming I/O (libp2p connections or Helia blockstore reads/writes) in a token‐bucket that caps throughput at e.g. X KB/s.
+
+Priorities: Assign each file a priority tag (high, normal, low). The plugin schedules chunk reads/writes such that high‐priority streams get first access to available tokens.
+
+HTTP Endpoints:
+
+GET /api/bandwidth/settings → return current throttle rates and priority rules.
+
+POST /api/bandwidth/set → body { globalRate: number (KB/s), defaultPriority: "low"|"normal"|"high" }.
+
+POST /api/bandwidth/setPriority/:cid → { priority: "low"|"normal"|"high" }.
+
+Integration Points
+
+onFileDownloaded / onFileUploaded Hooks: Check the file’s priority and adjust token‐bucket allocation accordingly.
+
+Libp2p Streams: When creating a libp2p.handle or dialing a new protocol, wrap the raw stream.sink/stream.source through a throttle transform.
+
+Helia Block Fetch: Similarly, override helia.blockstore.get calls to apply rate limits when serving large files.
+
+Why It’s Useful
+
+Prevents a single large download from saturating a peer’s limited connection.
+
+Ideal for nodes on metered or mobile networks: you can cap background syncs at 50 KB/s while allowing live video streams to burst up to 500 KB/s.
+
+- 
+
+3. Offline Sync & Conflict Resolution Plugin
+Goal: Enable peers to queue uploads or changes while offline, then automatically sync (and reconcile conflicts) once back online.
+
+Key Capabilities
+
+Local Change Queue: Maintain a LevelDB queue (syncQueue) of pending operations: file‐upload, file‐pin/unpin, metadata update. Buffer them while libp2p.isStarted === false.
+
+Conflict Detection: On reconnect, for each queued operation, check if the remote state diverged. E.g. if two peers updated metadata for the same CID offline, compare timestamps.
+
+Merge Strategy: Provide three conflict policies (configurable):
+
+Last‐Writer‐Wins: Use the newer timestamp.
+
+Manual‐Review: Mark conflicts and expose GET /api/sync/conflicts for manual resolution.
+
+Merge Tags: If both changes were metadata tags (arrays), union them.
+
+HTTP Endpoints:
+
+GET /api/sync/status → shows pendingQueue length, lastSyncTime.
+
+POST /api/sync/resolve → body { cid, resolution: { apply: "local"|"remote"|"merge", mergedMetadata? } }.
+
+Integration Points
+
+Wrap uploadFile(): If libp2p.isStarted === false, enqueue the upload instead of throwing. On peer:connect, flush the queue.
+
+onEvent("fileUploaded") & onEvent("filePinned") Hooks: Record operations to the queue if offline.
+
+After Flush: If a conflict arises (remote TTL older or newer), write a conflict record into conflictDb.
+
+Why It’s Useful
+
+Perfect for a peer that sporadically loses connectivity (e.g. mobile or laptop). Users can keep adding files while offline, and as soon as they reconnect to any other peer, everything syncs up automatically.
+
+Ensures no data is lost, and conflicts are surfaced clearly.
+
+--
+4. Content Indexing & Full‐Text Search Plugin
+Goal: Beyond filename searches, index file contents (e.g. text or code files) so peers can perform actual full‐text queries across stored documents.
+
+Key Capabilities
+
+Indexer: Whenever a new file is uploaded (and metadata type === text/plain or code‐type), download the decrypted payload, run a simple tokenizer (split on whitespace/punctuation), and index terms in a local inverted index (indexDb mapping term → set of CIDs).
+
+Stop‐Word Removal & Stemming: Skip common stop words (the, and, is) and do lightweight stemming (e.g. strip trailing “s” or “ing”).
+
+HTTP Endpoints:
+
+GET /api/search/fulltext?q=foo+bar → returns NetworkFileInfo[] matching any term, ranked by number of term occurrences.
+
+POST /api/search/reindex → force a full reindex of all current local files.
+
+GET /api/search/indexStats → shows total number of terms indexed, number of files, etc.
+
+Integration Points
+
+onFileUploaded: If fileInfo.type.startsWith("text/") or matches a code MIME (e.g. application/javascript), schedule an async job to downloadFile(cid) → decode Buffer → extract text → update inverted index.
+
+LevelDB Table: indexDb: term → JSON.stringify([cid1, cid2, …]). You can store frequency counts too if desired.
+
+searchFiles(): Override or augment the default name‐based search to also query this index.
+
+Why It’s Useful
+
+Allows users to “grep” across a distributed file store. For example, if a code repository is stored in Vinyl, you can find “function parseDate” even if you don’t know the filename.
+
+Great for document archives, wikis, or code‐sharing communities built on Vinyl.
