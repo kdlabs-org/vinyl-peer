@@ -10,41 +10,26 @@ import { NodeFile } from "./Node.js";
 
 const program = new Command();
 
-/**
- * CLIManager: eenvoudige façade‐klasse die direct Vinyl aanroept.
- */
 class CLIManager {
   public vinyl!: Vinyl;
   private nodeManager: NodeManager | null = null;
 
-  constructor() {
-    // We instantiate Vinyl when start() is called.
-  }
+  constructor() {}
 
-  /**
-   * Start the node with the given plugins and local‐storage option.
-   * 1) Create a new Vinyl()
-   * 2) Initialize it
-   * 3) Register & start each plugin manually
-   */
   async start(plugins: VinylPeerPlugin[], enableLocalStorage: boolean): Promise<boolean> {
-    // 1) Instantiate Vinyl without arguments
     this.vinyl = new Vinyl();
 
-    // 2) Initialize (starts libp2p, Helia, and sets up plugin context)
     const success = await this.vinyl.initialize(enableLocalStorage);
     if (!success) {
       return false;
     }
 
-    // 3) Register each plugin with the PluginManager, then start them
     const pluginManager = this.vinyl.getPluginManager();
     for (const plugin of plugins) {
       await pluginManager.registerPlugin(plugin);
     }
     await pluginManager.startAllPlugins();
 
-    // 4) Create NodeManager wrapper that relies on vinyl having been initialized
     this.nodeManager = new NodeManager(this.vinyl as any);
     return true;
   }
@@ -115,10 +100,6 @@ class CLIManager {
 
 program.name("vinyl-peer").description("Vinyl Peer – P2P Music Sharing Network").version("1.0.0");
 
-/**
- * Helper: given a comma-separated list of plugin names, return instances.
- * Currently recognizes "music" and "analytics".
- */
 function instantiatePlugins(list: string): VinylPeerPlugin[] {
   const names = list.split(",").map((s) => s.trim().toLowerCase());
   const result: VinylPeerPlugin[] = [];
@@ -157,7 +138,6 @@ program
     console.log("🎵 Starting Vinyl Peer node...");
     const cliManager = new CLIManager();
 
-    // Parse plugin list and instantiate
     const pluginList = instantiatePlugins(options.plugins as string);
 
     try {
@@ -204,7 +184,7 @@ program
       }
 
       const cliManager = new CLIManager();
-      // Voor een enkele upload gebruiken we GEEN plugins, enkel lokale opslag
+
       await cliManager.start([], true);
 
       console.log(`📤 Uploading ${resolvedPath}...`);
@@ -227,9 +207,6 @@ program
     }
   });
 
-/**
- * `download <cid> <output>`: download een bestand naar een lokaal pad.
- */
 program
   .command("download <cid> <output>")
   .description("Download a file from the network")
@@ -238,7 +215,6 @@ program
       const resolvedPath = path.resolve(output);
       const cliManager = new CLIManager();
 
-      // Geen plugins nodig om te downloaden; wel lokale opslag nodig
       await cliManager.start([], true);
 
       console.log(`📥 Downloading ${cid} to ${resolvedPath}...`);
@@ -257,9 +233,6 @@ program
     }
   });
 
-/**
- * `search <query>`: zoek in het netwerk naar bestanden.
- */
 program
   .command("search <query>")
   .description("Search for files in the network")
@@ -267,7 +240,7 @@ program
     try {
       console.log(`🔍 Searching for "${query}"...`);
       const cliManager = new CLIManager();
-      // Om te zoeken is alleen lokale opslag & netwerk nodig
+
       await cliManager.start([], true);
 
       const results = await cliManager.searchFiles(query);
@@ -293,9 +266,6 @@ program
     }
   });
 
-/**
- * `pin <cid>`: pin een bestand lokaal in IPFS.
- */
 program
   .command("pin <cid>")
   .description("Pin a file to keep it in local storage")
@@ -315,9 +285,6 @@ program
     }
   });
 
-/**
- * `unpin <cid>`: unpin een bestand uit lokale IPFS.
- */
 program
   .command("unpin <cid>")
   .description("Unpin a file from local storage")

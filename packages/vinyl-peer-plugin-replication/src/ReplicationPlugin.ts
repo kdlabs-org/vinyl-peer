@@ -86,7 +86,6 @@ export class ReplicationPlugin extends BasePlugin {
   }
 
   async stop(): Promise<void> {
-    // (Optionally you could “unsubscribe,” but libp2p’s current pubsub API doesn’t expose an unsubscribe call.)
     this.enabled = false;
     await super.stop();
   }

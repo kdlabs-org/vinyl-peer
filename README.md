@@ -1,12 +1,253 @@
 # Vinyl Peer Monorepo
 
-Vinyl Peer is a modular, peer-to-peer (P2P) media-sharing network built with TypeScript. It leverages **libp2p** for decentralized networking and optionally integrates **Helia/IPFS** for local storage. The monorepo consists of the following packages:
+**Vinyl Peer** is a modular, peer-to-peer (P2P) media-sharing network built with TypeScript. It leverages **libp2p** for decentralized networking and optionally integrates **Helia/IPFS** for local storage and content addressing. This monorepo houses a collection of packages that work together to provide a robust, extensible platform for sharing, discovering, and managing media files in a decentralized environment.
 
-- **vinyl-peer-protocol** (core P2P framework & plugin host)
-- **vinyl-peer-music-plugin** (music-specific functionality)
-- **vinyl-peer-analytics** (node & file analytics)
-- **vinyl-peer-replication-plugin** (auto-pin/replication)
-- **vinyl-peer-cli** (CLI + Express web server)
+The monorepo includes the following packages:
+
+- **`vinyl-peer-protocol`** - Core P2P framework and plugin host.
+- **`vinyl-peer-plugin-music`** - Music-specific functionality (metadata, search, recommendations).
+- **`vinyl-peer-plugin-analytics`** - Analytics for nodes and files.
+- **`vinyl-peer-plugin-replication`** - Automatic file replication (auto-pinning).
+- **`vinyl-peer-plugin-sdk-generator`** - SDK generation for interacting with Vinyl nodes.
+- **`vinyl-peer-plugin-v`** - V (peer to peer) Microblogging like X .
+- **`vinyl-peer-plugin-rs`** - Reed-Solomon encoding for resilient file storage.
+- **`vinyl-peer-cli`** - Command-line interface (CLI) and Express-based web server.
+
+---
+
+# Why Vinyl Peer?
+
+**Vinyl Peer** is more than “just IPFS + libp2p.” It’s an end-to-end framework designed to take the boilerplate and complexity out of building a decentralized media-sharing application. Here’s what Vinyl Peer gives you, and why you might choose it over a raw IPFS or libp2p setup.
+
+---
+
+## 1. All-in-One, Batteries-Included Framework
+
+### 1.1. Unified Networking & Storage
+
+- **libp2p for P2P Transport**
+  Vinyl Peer uses libp2p under the hood for peer discovery, connection multiplexing, NAT traversal, and pubsub. You get a battle-tested networking stack without wiring it up yourself.
+
+- **Helia (In-Process IPFS) for Content Addressing**
+  Instead of spawning a separate go-ipfs daemon or managing an external IPFS HTTP client, Vinyl Peer embeds an IPFS node (via Helia) directly in your application. That means:
+
+  - One process, one libp2p instance, one configuration.
+  - Synchronous, in-memory `helia.fs.add()` / `helia.fs.cat()` calls—no HTTP RPC round-trips.
+  - Pinning, blockstore, and CID management all live in the same runtime.
+
+### 1.2. Opinionated File Management
+
+When you build on plain IPFS, you decide where and how to store metadata, how to handle uploads/downloads, and how to track pins. Vinyl Peer comes with:
+
+- **Automatic AES-GCM Encryption**
+  Every file upload is encrypted client-side with a rotating key. Each blob on IPFS begins with a 1-byte key version + 12-byte IV + ciphertext. You never need to sprinkle your own `crypto.subtle.encrypt()` calls throughout your code.
+
+- **Daily Key Rotation & Key Versioning**
+  Vinyl Peer rotates its AES-GCM key every 24 hours and retains the last three key versions in memory. That way, any file encrypted within the past three days is still decryptable—no manual key vault needed.
+
+- **HMAC-Signed Audit Log**
+  Every action that matters—“nodeStarted,” “keyRotation,” “fileUploaded,” “pluginRegistered,” “filePinned”—is appended to `vinyl-audit.log` as a JSON line signed with HMAC-SHA256. This gives you a tamper-evident history of everything your node has done.
+
+- **LevelDB Index of FileInfo**
+  Vinyl Peer maintains a local LevelDB (`fileDb`) mapping each metadata-CID → a `FileInfo` record:
+
+  ```ts
+  interface FileInfo {
+    cid: string; // the metadata's IPFS/Helia CID
+    name: string; // original filename
+    size: number; // byte length
+    type: string; // MIME type
+    uploadDate: Date;
+    encrypted: boolean;
+    storageMode: "ipfs" | "p2p-stream";
+    streamId?: string; // if streaming mode
+    pinned: boolean;
+    shareLink: string; // vinyl://ipfs/<cid> or vinyl://stream/<id>
+    metadata?: any; // plugin-enhanced fields
+  }
+  ```
+
+  With that index, you get:
+
+  - **Fast lookups** for downloads and metadata queries.
+  - **Searchable file names** via `/api/search?q=…`.
+  - **Pin/unpin state** tracked alongside file info.
+
+---
+
+## 2. Plugin-Based Extensibility
+
+Vinyl Peer’s true power lies in its **modular plugin system**. Out of the box, you get core file operations and a handful of HTTP endpoints. Anything beyond that—music discovery, analytics, replication, microblogging, Reed-Solomon encoding—is a plugin. Here’s why that matters:
+
+### 2.1. Standardized Plugin Context
+
+Every plugin gets a `PluginContext` with:
+
+```ts
+interface PluginContext {
+  nodeId: string; // libp2p peer ID
+  libp2p: Libp2p; // the libp2p instance
+  files: Map<string, FileInfo>; // an async-iterator-backed view of fileDb
+  peers: Map<string, PeerInfo>; // in-memory peer list
+  networkFiles: Map<string, NetworkFileInfo>;
+  emit: (event: string, envelope: { source: string; payload: any }) => void;
+  pinFile: (cid: string) => Promise<void>;
+  unpinFile: (cid: string) => Promise<void>;
+  getPermissions: () => PluginPermissions;
+}
+```
+
+Plugins can:
+
+- **Listen** for events (`onPeerConnected`, `onFileUploaded`, etc.)
+- **Enhance metadata** on upload (`enhanceMetadata`)
+- **Define custom libp2p protocols** (`protocols: ["/music-discovery/1.0.0", …]`), automatically bound with size limits and optional peer authentication
+- **Expose HTTP routes** under a namespace (`/api/music`, `/api/rs`, `/api/analytics`, etc.)
+
+### 2.2. No Reinventing the Wheel
+
+Without Vinyl Peer, each new feature would require:
+
+- Wiring your own event emitter or callback system.
+- Manually binding custom protocols in libp2p (with your own error handling and size limits).
+- Mounting Express routers and applying CORS, Helmet, and rate limiting every time.
+- Handling plugin-permission checks on each file or network operation.
+
+Vinyl Peer centralizes all that. You simply implement `getCapabilities()`, `initialize()`, `start()`, `handleProtocol()`, and (optionally) `getHttpNamespace()` + `getHttpRouter()`. The rest is boilerplate that Vinyl Peer handles for you.
+
+---
+
+## 3. Unified HTTP API
+
+When you run the Vinyl Peer CLI, you get one Express server that serves:
+
+1. **Core Routes**
+
+   - `GET /api/status` — Node health, peer counts, etc.
+   - `GET /api/peers` — Snapshot of connected peers.
+   - `GET /api/files` — List all local `FileInfo`.
+   - `POST /api/upload` — Upload + encrypt + store + index.
+   - `GET /api/download/:cid` — Fetch + decrypt + stream.
+   - `GET /api/search?q=…` — Search on filename (and plugin results).
+   - `POST /api/pin/:cid` — Pin in Helia/IPFS.
+   - `DELETE /api/pin/:cid` — Unpin.
+   - `GET /api/events` — SSE feed of recent node events.
+
+2. **Plugin Routes**
+
+   - `/api/music` (Music Plugin)
+   - `/api/analytics` (Analytics Plugin)
+   - `/api/replication` (Replication Plugin)
+   - `/api/v` (Microblogging Plugin)
+   - `/api/rs` (Reed-Solomon Plugin)
+   - …and any others you install.
+
+Because everything lives on the same Express app:
+
+- **One port** (`3001` by default) and one CORS/Helmet/rate-limit configuration.
+- **No need** to track multiple servers or route prefixes manually.
+- **Consistent error handling** across core + plugins.
+
+---
+
+## 4. Audit Logging & Real-Time Event Streaming
+
+Vinyl Peer provides two complementary ways to track node activity:
+
+1. **HMAC-Signed Audit Log (`vinyl-audit.log`)**
+   Every critical action is logged as a signed JSON line, e.g.:
+
+   ```jsonc
+   {
+     "timestamp": "2023-08-21T14:23:01.123Z",
+     "event": "fileUploaded",
+     "plugin": "core",
+     "details": { "cid": "QmXYZ…" },
+     "signature": "a1b2c3…",
+   }
+   ```
+
+   If you ever need to prove “which AES key version encrypted file X” or “when plugin Y registered,” you simply inspect this log.
+
+2. **SSE Endpoint (`GET /api/events`)**
+
+   - **Replays** the last 20 events (from an in-memory circular buffer).
+   - **Pushes** new events live over Server-Sent Events (SSE), so a web UI or monitoring service can subscribe in real time:
+
+     ```
+     event: fileUploaded
+     data: {"cid":"QmXYZ…","metadata":{…}}
+     ```
+
+   This built-in feed means you don’t have to add another WebSocket or polling mechanism—Vinyl Peer gives you a turnkey solution.
+
+---
+
+## 5. When to Choose Vinyl Peer vs. Raw IPFS/Helia/Libp2p
+
+### 5.1. Choose Vinyl Peer If You Need…
+
+- **Seamless AES-GCM encryption** on every upload, with rotating keys and built-in decryption.
+- **Automatic audit logging** of node and plugin events, with HMAC signatures.
+- **A plugin ecosystem** where you can drop in a Music Plugin, Analytics Plugin, Reed-Solomon Plugin, etc., with minimal boilerplate.
+- **One HTTP API** that unifies core file operations and plugin routes—no juggling multiple servers or prefixes.
+- **In-process IPFS** (Helia) that shares the same libp2p instance as your node, avoiding external daemons or RPC calls.
+- **Built-in SSE** for streaming node events to a UI or monitoring tool.
+
+### 5.2. Choose Raw IPFS/Helia/Libp2p If You…
+
+- Only need **basic “put/get”** functionality without encryption or metadata indexing.
+- Prefer to **craft your own** encryption/key-management system, your own metadata store, and your own protocol definitions.
+- Don’t require a **modular plugin** architecture or a unified audit log.
+- Want absolute control over your dependency graph, build process, and on-disk schema from scratch.
+- Are building a very lightweight proof-of-concept where you only need a single IPFS-powered file upload endpoint.
+
+---
+
+## 6. A Real “Vinyl” Protocol
+
+While Vinyl Peer reuses libp2p’s transport and Helia’s blockstore, it layers on a coherent, end-to-end application protocol:
+
+1. **Wire-Level Conventions**
+
+   - Every plugin uses protocol strings like `"/vinyl-network/1.0.0"`, `"/music-discovery/1.0.0"`, `"/analysis/1.0.0"`, `"/rs-shard/1.0.0"`.
+   - Every encrypted payload is prefixed by `[keyVersion (1 byte) | IV (12 bytes) | ciphertext …]`. Any Vinyl Peer node can decrypt it if it holds that key version.
+
+2. **On-Disk & In-Memory Schema**
+
+   - **LevelDB** for `FileInfo` (mapping metadata CID → file metadata).
+   - **In-Memory Maps** for connected peers, streamed shards, and network-advertised files.
+   - **HMAC Audit Log** for tamper-evident event history.
+
+3. **HTTP Conventions**
+
+   - Core routes (`/api/status`, `/api/upload`, `/api/download/:cid`, `/api/search`, `/api/pin/:cid`).
+   - Plugin routes mounted under `/api/<pluginNamespace>/*` (e.g. `/api/music/*`, `/api/analytics/*`, `/api/rs/*`).
+   - SSE feed at `/api/events` that any client can subscribe to.
+
+Any client or plugin that knows these conventions can interoperate with a Vinyl Peer node—upload, download, decrypt, pin, or subscribe to events. In this sense, **Vinyl Peer is a higher-level protocol** built on top of the generic libp2p transport stack, much like how HTTP is a protocol on top of TCP.
+
+---
+
+## 7. Conclusion
+
+Vinyl Peer exists because building a full-featured P2P media-sharing app purely on IPFS or libp2p still requires months of wiring:
+
+- AES-GCM encryption, key rotation, and HMAC auditing.
+- Metadata indexing, LevelDB integration, and search.
+- Unified HTTP server, CORS, Helmet, and rate limits.
+- A clean plugin/event system to avoid monolithic code.
+- Real-time SSE for monitoring node activity.
+
+Vinyl Peer assembles all these pieces into a single, modular monorepo. You get:
+
+- **Core Node** (libp2p + Helia)
+- **File Operations** (encrypt, upload, index, download, pin)
+- **Plugin Framework** (easy to add music, analytics, replication, RS, microblogging, etc.)
+- **HTTP API** (core + plugin routes)
+- **Audit & Events** (HMAC log + SSE)
+
+By choosing Vinyl Peer, you focus on your application logic—your media app, your analytics dashboard, your resilient‐shard storage—rather than reinventing the foundational plumbing every time. If you need a production-ready, end-to-end P2P file-sharing stack, **Vinyl Peer is the far-faster, far-safer choice** over wiring up IPFS and libp2p from scratch.
 
 ---
 
@@ -19,888 +260,296 @@ Vinyl Peer is a modular, peer-to-peer (P2P) media-sharing network built with Typ
 5. [Execution Commands](#execution-commands)
 6. [Code Examples](#code-examples)
 7. [Packages](#packages)
+   - [vinyl-peer-protocol](#1-vinyl-peer-protocol-core)
+   - [vinyl-peer-plugin-music](#2-vinyl-peer-plugin-music)
+   - [vinyl-peer-plugin-analytics](#3-vinyl-peer-plugin-analytics)
+   - [vinyl-peer-plugin-replication](#4-vinyl-peer-plugin-replication)
+   - [vinyl-peer-plugin-sdk-generator](#5-vinyl-peer-plugin-sdk-generator)
+   - [vinyl-peer-plugin-v](#6-vinyl-peer-plugin-v)
+   - [vinyl-peer-plugin-rs](#7-vinyl-peer-plugin-rs)
+   - [vinyl-peer-cli](#8-vinyl-peer-cli)
 8. [Contributing](#contributing)
-9. [License](#license)
+9. [Troubleshooting](#troubleshooting)
+10. [License](#license)
 
 ---
 
 ## Overview
 
-Vinyl Peer enables decentralized sharing, discovery, replication, and analytics for media files (audio, video, documents, etc.) through a **plugin-based architecture**. The core (`vinyl-peer-protocol`) manages:
+Vinyl Peer is designed to facilitate decentralized media sharing through a **plugin-based architecture**. At its heart, the `vinyl-peer-protocol` package provides a foundation that includes:
 
-- A **libp2p** node (peer discovery, multiplexed streams, NAT traversal)
-- Optional **Helia/IPFS** local storage (for content addressing, pinning)
-- An HTTP server via **vinyl-peer-cli**
-- A **plugin framework** that lets you add features—such as music discovery, analytics, and auto-pinning—without modifying core code.
+- A **libp2p** node for peer discovery, connection multiplexing, and NAT traversal.
+- Optional **Helia/IPFS** integration for persistent local storage and content-addressed file management.
+- A flexible plugin system that allows developers to extend functionality without altering the core.
+- An HTTP server (via `vinyl-peer-cli`) for interacting with the node and its plugins through a web interface or API.
 
-Plugins can:
+### Key Features
 
-- Declare and handle custom **libp2p protocols**
-- Hook into file upload/download events
-- Enhance metadata (e.g. extract ID3 tags from audio)
-- Expose their own HTTP endpoints (mounted under a unique namespace by the CLI)
-- Pin or unpin IPFS CIDs (via the new `pinFile` / `unpinFile` API)
+- **Decentralized Networking**: Connect peers without a central server using libp2p.
+- **Extensibility**: Add new features via plugins that hook into the core system.
+- **File Management**: Upload, download, pin, unpin, and search for files across the network.
+- **HTTP Interface**: Access node functionality and plugin features via RESTful endpoints.
+
+Plugins enhance the system by:
+
+- Defining custom **libp2p protocols** for peer communication.
+- Reacting to file events (e.g., uploads/downloads).
+- Enriching file metadata (e.g., extracting ID3 tags for music files).
+- Exposing custom HTTP endpoints under unique namespaces.
+- Managing IPFS content identifiers (CIDs) for pinning and replication.
 
 ---
 
 ## Use Cases
 
-Vinyl Peer supports a wide range of scenarios:
+Vinyl Peer supports a wide range of decentralized applications. Below are detailed use cases with examples:
 
 1. **Decentralized Media Sharing**
 
-   - **What?** Upload/download/stream files across a P2P network.
-   - **Example:** Friends share and stream high-fidelity audio tracks without a central server.
+   - **Description**: Share media files (e.g., music, videos) directly between peers.
+   - **Example**: A user uploads a high-resolution music album, and peers download or stream it without relying on a central server.
 
 2. **Music Discovery & Recommendations**
 
-   - **What?** Search by artist, album, genre; receive related-genre recommendations.
-   - **Example:** A user searches “jazz” and finds new artists or tracks via the Music Plugin.
+   - **Description**: Search and discover music based on metadata like artist, album, or genre.
+   - **Example**: Query the network for "jazz albums from the 1960s" and receive recommendations from peers.
 
 3. **Auto-Replication (Auto-Pinning)**
 
-   - **What?** Automatically pin every file you download—ensuring it stays cached locally and helps replicate to other peers.
-   - **Example:** A node operator installs the Replication Plugin; every time they download a CID, it’s auto-pinned in IPFS.
+   - **Description**: Automatically replicate files to ensure availability across the network.
+   - **Example**: A rare documentary is downloaded and pinned locally to keep it accessible even if the original uploader goes offline.
 
 4. **Network Analytics**
 
-   - **What?** Track peer counts, file popularity, bandwidth usage, pin counts, etc.
-   - **Example:** A researcher monitors which genres are trending across nodes via the Analytics Plugin.
+   - **Description**: Monitor network health and file usage statistics.
+   - **Example**: A node operator checks how many peers are active or which files are most popular.
 
-5. **Lightweight Relay Nodes**
+5. **Microblogging**
 
-   - **What?** Run without local storage; contribute only to peer routing and pubsub.
-   - **Example:** A user with limited disk space runs in “relay-only” mode to boost network connectivity.
+   - **Description**: Share short posts or media updates in a decentralized social network.
+   - **Example**: A musician posts a link to a new track, and followers see it in their timeline.
+
+6. **Resilient File Storage**
+
+   - **Description**: Use Reed-Solomon encoding to split files into recoverable shards.
+   - **Example**: A video file is stored as shards across peers, allowing reconstruction even if some are lost.
+
+7. **SDK Generation**
+   - **Description**: Generate a TypeScript SDK for programmatic interaction with Vinyl nodes.
+   - **Example**: A developer builds a custom web app to browse music using the generated SDK.
 
 ---
 
 ## Design & Architecture
 
-### 1. Modularity via Plugins
+### Modularity via Plugins
 
-- **Why?** Keep core light and allow independent development.
-- **How?**
+- **Purpose**: Keep the core lightweight while allowing unlimited extensibility.
+- **Implementation**:
+  - The `vinyl-peer-protocol` package provides a `PluginContext` with access to libp2p, file metadata, pinning APIs, and an event bus.
+  - Plugins implement the `VinylPeerPlugin` interface, specifying their capabilities, libp2p protocols, and required permissions.
+  - The `vinyl-peer-cli` package mounts plugin-specific HTTP routes under unique namespaces (e.g., `/api/music` for the Music Plugin).
 
-  - `vinyl-peer-protocol` provides a **PluginContext** (with libp2p, file maps, pin/unpin API, event bus).
-  - Each plugin implements `VinylPeerPlugin` and declares:
+### Core Components (`vinyl-peer-protocol`)
 
-    - A unique **name/version**
-    - One or more **libp2p protocols** (e.g. `/music-discovery/1.0.0`)
-    - **Capabilities**, **fileTypes**, and **permissions** (e.g. `["audio/*"]` + `{ accessFiles: true, useNetwork: true, ... }`)
-    - (Optionally) HTTP routes under a namespace (e.g. `/api/music`)
+- **libp2p Node**: Handles peer discovery, connection management, and protocol multiplexing.
+- **Helia/IPFS (Optional)**: Provides content-addressed storage and retrieval.
+- **File Operations**: Manages uploads, downloads, and metadata.
+- **Plugin System**: Registers and coordinates plugins.
 
-  - Plugins register themselves with the core; core routes incoming libp2p streams to the correct plugin.
-  - The actual HTTP server lives in `vinyl-peer-cli`, which mounts each plugin’s router under the namespace returned by `getHttpNamespace()`.
+### PluginContext
 
----
+- **Description**: A shared interface for plugins to interact with the node.
+- **Capabilities**:
+  - Access to the libp2p instance for custom protocol handling.
+  - File metadata storage and retrieval.
+  - Pinning/unpinning APIs for IPFS content.
+  - Event bus for subscribing to and emitting events (e.g., file uploaded).
 
-### 2. Core (`vinyl-peer-protocol`)
+### HTTP Server
 
-- **Libp2p Node**
-
-  - Transports: TCP, WebSockets, WebRTC, circuit-relay
-  - Security: Noise encryption, Yamux multiplexing
-  - Peer Discovery: Bootstrap nodes + optional mDNS (Node only)
-  - Services: identify, kadDHT, ping
-
-- **Helia/IPFS (Optional)**
-
-  - If local storage is enabled, a Helia (IPFS) node is spawned.
-  - You can add bytes, cat bytes, pin, and unpin via Helia.
-
-- **File Management**
-
-  1. **uploadFile(...)**
-
-     - Reads raw bytes, encrypts with AES-256, and either:
-
-       - Stores in IPFS (if `storageMode = "ipfs"` and local storage enabled)
-       - Or stores in an in-memory stream (for P2P streaming)
-
-     - Calls each plugin’s `enhanceMetadata(uploadedFile)` to allow plugins to parse tags or add custom metadata.
-     - Stores a metadata CID (or `metadata-<uuid>` for streaming) → `FileInfo` in `this.files`.
-     - Emits a `fileUploaded` event (envelope shape: `{ source, payload }`) and calls each plugin’s `onFileUploaded(...)`.
-
-  2. **downloadFile(cid)**
-
-     - If `cid` is a metadata CID, resolves the corresponding audio CID.
-     - Retrieves encrypted bytes either from IPFS or in-memory.
-     - Decrypts and returns the raw file bytes.
-     - Emits a `fileDownloaded` event and calls each plugin’s `onFileDownloaded(...)`.
-
-  3. **pinFile(cid)** / **unpinFile(cid)**
-
-     - Pin or unpin a given IPFS CID in Helia.
-     - Updates `FileInfo.pinned` and emits `filePinned` / `fileUnpinned`.
-
-- **Event Bus & PluginManager**
-
-  - Plugins subscribe to core events via optional hooks:
-
-    - `onPeerConnected(peerId, peerInfo)`
-    - `onPeerDisconnected(peerId, peerInfo)`
-    - `onFileUploaded(cid, fileInfo)`
-    - `onFileDownloaded(cid)`
-
-  - Core also provides:
-    - `searchFiles(query: string)` → runs built-in local search + each plugin’s `searchFiles(...)`
-    - `getRecommendations(basedOnCid)` → aggregates results from each plugin’s `getRecommendations(...)`
-
-- **HTTP Server (via `vinyl-peer-cli`)**
-
-  - Plugins still implement `getHttpNamespace()` and `getHttpRouter()`, but do **not** mount under a libp2p-owned server.
-  - Instead, `vinyl-peer-cli` creates its own Express app (in `WebServer.ts`), then automatically mounts each plugin’s router under the path returned by `getHttpNamespace()`.
-  - Example: if MusicPlugin returns `/api/music`, the CLI’s server will mount its router there.
+- **Hosted By**: `vinyl-peer-cli`.
+- **Functionality**: Exposes core routes (e.g., `/upload`, `/search`) and plugin routes (e.g., `/api/analytics/stats`).
 
 ---
 
-### 3. PluginContext
+## Installation
 
-Every plugin’s `initialize(context: PluginContext)` receives:
+Follow these steps to set up the Vinyl Peer Monorepo locally:
 
-```ts
-export interface PluginContext {
-  /** Unique PeerID of this node */
-  nodeId: string;
-
-  /** The underlying libp2p instance */
-  libp2p: any;
-
-  /** Map of metadata CID → FileInfo for all locally uploaded files */
-  files: Map<string, FileInfo>;
-
-  /** Map of peerId → PeerInfo for all known peers */
-  peers: Map<string, PeerInfo>;
-
-  /** Map of remote file advertisements (NetworkFileInfo) */
-  networkFiles: Map<string, NetworkFileInfo>;
-
-  /**
-   * Internal event emitter.
-   * Must be called with an envelope: `{ source: <pluginName>, payload: <any> }`.
-   * Core validates the envelope before broadcasting to listeners.
-   */
-  emit: (event: string, envelope: { source: string; payload: any }) => void;
-
-  /** Pin a CID (replicate/download it locally into IPFS) */
-  pinFile: (cid: string) => Promise<void>;
-
-  /** Unpin a CID */
-  unpinFile: (cid: string) => Promise<void>;
-
-  /** Retrieve this plugin’s granted permissions */
-  getPermissions: () => PluginPermissions;
-}
-```
-
-Plugins typically store `this.context = context;` in their `initialize(...)`. Then they can:
-
-- `this.context.libp2p.handle(protocol, handler)` to bind a custom protocol
-- Read or modify `this.context.files.get(cid)` to inspect local files
-- Mark peers (e.g. `peer.isMusicNode = true`) if `modifyPeers` permission was granted
-- Auto-pin/unpin via `this.context.pinFile(cid)` / `this.context.unpinFile(cid)`
-- Emit custom events like `this.context.emit("someEvent", { source: pluginName, payload })`
-
----
-
-## Key Interfaces & Base Classes
-
-Below are the detailed TypeScript definitions for the plugin system, including the new permission fields and updated `emit` signature.
-
-### 1. `PluginPermissions`
-
-```ts
-export interface PluginPermissions {
-  accessFiles: boolean; // Can read/write context.files
-  useNetwork: boolean; // Can dial or handle libp2p protocols
-  modifyPeers: boolean; // Can tag peers or change PeerInfo fields
-  exposeHttp: boolean; // Can register HTTP routes via getHttpRouter()
-}
-```
-
-### 2. `PluginCapabilities`
-
-```ts
-export interface PluginCapabilities {
-  /** Unique plugin name (e.g. "vinyl-peer-music-plugin") */
-  name: string;
-
-  /** Semantic version, e.g. "1.0.0" */
-  version: string;
-
-  /** Custom libp2p protocols this plugin handles */
-  protocols: string[]; // e.g. ["/music-discovery/1.0.0", "/music-metadata/1.0.0"]
-
-  /** Functional tags (e.g. ["discovery", "metadata"]) */
-  capabilities: string[];
-
-  /** Optional: MIME-type prefixes this plugin will receive (e.g. ["audio/*"]) */
-  fileTypes?: string[];
-
-  /** Permissions that this plugin requests from the host node */
-  permissions: PluginPermissions;
-}
-```
-
-### 3. `VinylPeerPlugin`
-
-```ts
-export interface VinylPeerPlugin {
-  // ─── Required (must implement) ─────────────────────────────────
-
-  /** Return capabilities (name, version, protocols, capabilities, fileTypes, permissions) */
-  getCapabilities(): PluginCapabilities;
-
-  /** Called once at startup; store context & verify permissions */
-  initialize(context: PluginContext): Promise<boolean>;
-
-  /** Called after libp2p.start(); set up protocols, intervals, etc. */
-  start(): Promise<void>;
-
-  /** Called during node shutdown; clear intervals or cleanup resources */
-  stop(): Promise<void>;
-
-  /** Register all libp2p handlers (e.g. context.libp2p.handle(protocol, handler)) */
-  setupProtocols(): void;
-
-  /** Invoked whenever a registered protocol stream arrives */
-  handleProtocol(protocol: string, stream: any, peerId: string): Promise<void>;
-
-  // ─── Optional Hooks (implement as needed) ────────────────────────
-
-  /** Filter which uploaded/downloaded files your plugin cares about */
-  canHandleFile?(file: FileInfo): boolean;
-
-  /** Called by core during uploadFile to add custom metadata */
-  enhanceMetadata?(file: UploadFile): Promise<any>;
-
-  /** Called whenever any file upload finishes; good for indexing or caching */
-  onFileUploaded?(cid: string, fileInfo: FileInfo): void;
-
-  /** Called whenever downloadFile(cid) succeeds; useful for auto-pin or cache */
-  onFileDownloaded?(cid: string): void;
-
-  /** Called whenever a local peer connects */
-  onPeerConnected?(peerId: string, peer: PeerInfo): void;
-
-  /** Called whenever a local peer disconnects */
-  onPeerDisconnected?(peerId: string, peer: PeerInfo): void;
-
-  /** Provide search results when core calls vinyl.searchFiles(query) */
-  searchFiles?(query: any): Promise<NetworkFileInfo[]>;
-
-  /** Provide recommendations when core calls vinyl.getRecommendations(cid) */
-  getRecommendations?(basedOnCid: string): Promise<NetworkFileInfo[]>;
-
-  /** (Optional) Test whether a peer supports your protocols */
-  identifyPeer?(peerId: string): Promise<boolean>;
-
-  // ─── HTTP Extension Hooks (if plugin exposes REST) ─────────────────
-
-  /** Return the HTTP namespace (e.g. "/analytics") */
-  getHttpNamespace?(): string;
-
-  /** Return an Express Application or Router for your routes */
-  getHttpRouter?(): Application | Router;
-}
-```
-
-### 4. `BasePlugin`
-
-```ts
-export abstract class BasePlugin implements VinylPeerPlugin {
-  protected context: PluginContext | null = null;
-  protected isInitialized: boolean = false;
-  protected isStarted: boolean = false;
-
-  /** Must be implemented by each plugin to declare its name/version/protocols/etc. */
-  abstract getCapabilities(): PluginCapabilities;
-
-  async initialize(context: PluginContext): Promise<boolean> {
-    this.context = context;
-    this.isInitialized = true;
-
-    // Verify requested permissions do not exceed granted permissions
-    const requested = this.getCapabilities().permissions;
-    const granted = context.getPermissions();
-    for (const perm of Object.keys(requested) as (keyof PluginPermissions)[]) {
-      if (requested[perm] && !granted[perm]) {
-        console.error(
-          `Plugin "${this.getCapabilities().name}" requested unauthorized permission: ${perm}`,
-        );
-        return false;
-      }
-    }
-    return true;
-  }
-
-  async start(): Promise<void> {
-    if (!this.isInitialized) {
-      throw new Error("Plugin must be initialized before starting");
-    }
-    this.setupProtocols();
-    this.isStarted = true;
-  }
-
-  async stop(): Promise<void> {
-    this.isStarted = false;
-  }
-
-  abstract setupProtocols(): void;
-  abstract handleProtocol(protocol: string, stream: any, peerId: string): Promise<void>;
-
-  /**
-   * Wrap every emitted event in an envelope: { source: pluginName, payload }
-   * and forward to context.emit(...).
-   */
-  protected emit(event: string, payload: any): void {
-    if (!this.context) return;
-    const pluginName = this.getCapabilities().name;
-    if (typeof event !== "string" || event.trim() === "") {
-      console.warn(`Plugin "${pluginName}" attempted to emit invalid event:`, event);
-      return;
-    }
-    this.context.emit(event, { source: pluginName, payload });
-  }
-}
-```
-
----
-
-## Creating a New Plugin Project
-
-1. **Navigate to the monorepo root** (or your plugin workspace)
-
-2. **Create a new folder** under `packages/` (e.g. `vinyl-peer-video-plugin`)
-
-3. **Initialize a `package.json`** with at least:
-
-   ```jsonc
-   {
-     "name": "vinyl-peer-video-plugin",
-     "version": "1.0.0",
-     "main": "dist/cjs/index.js",
-     "module": "dist/esm/index.js",
-     "types": "dist/esm/index.d.ts",
-     "scripts": {
-       "build": "tsc -b",
-     },
-     "dependencies": {
-       "vinyl-peer-protocol": "workspace:*",
-       "express": "^4.18.0",
-     },
-     "devDependencies": {
-       "typescript": "^4.x",
-     },
-   }
-   ```
-
-4. **Create a `tsconfig.json`** targeting ES2020, `module: esnext`, output to `dist/`
-
-5. **Install dependencies** (e.g. `npm install` or `yarn install` from repo root)
-
-6. **Create your plugin’s source file**, e.g. `src/VideoPlugin.ts`
-
-Your directory tree might look like:
-
-```
-packages/
-└── vinyl-peer-video-plugin/
-    ├── package.json
-    ├── tsconfig.json
-    └── src/
-        └── VideoPlugin.ts
-```
-
----
-
-## Implementing Your Plugin
-
-Below is a step-by-step breakdown for implementing a plugin. We’ll use a hypothetical “VideoPlugin” that:
-
-- Advertises a custom libp2p protocol `/video-metadata/1.0.0`
-- Hooks on file uploads to extract video resolution metadata
-- Provides a simple search by resolution and title
-- Exposes HTTP endpoints under `/api/video`
-
-### 1. Define Capabilities
-
-In `VideoPlugin.ts`, import core types:
-
-```ts
-import {
-  BasePlugin,
-  PluginCapabilities,
-  PluginContext,
-  VinylPeerPlugin,
-} from "vinyl-peer-protocol";
-import { PeerInfo, FileInfo, NetworkFileInfo, UploadFile } from "vinyl-peer-protocol";
-import express, { Request, Response, Router } from "express";
-
-interface VideoMetadata {
-  title?: string;
-  resolution?: string; // e.g. "1920x1080"
-  durationSeconds?: number; // e.g. 120
-}
-```
-
-Start your class and declare requested permissions:
-
-```ts
-export class VideoPlugin extends BasePlugin implements VinylPeerPlugin {
-  private videoMetadataStore: Map<string, VideoMetadata> = new Map();
-
-  constructor() {
-    super();
-  }
-
-  getCapabilities(): PluginCapabilities {
-    return {
-      name: "vinyl-peer-video-plugin",
-      version: "1.0.0",
-      protocols: [
-        "/video-metadata/1.0.0", // custom libp2p protocol
-        "/video-discovery/1.0.0", // another discovery protocol
-      ],
-      capabilities: ["metadata", "search", "video"],
-      fileTypes: ["video/*"], // only receive video uploads
-      permissions: {
-        accessFiles: true, // need to read/write context.files
-        useNetwork: true, // need to handle and dial protocols
-        modifyPeers: true, // might tag peers as “video nodes”
-        exposeHttp: true, // will expose HTTP routes
-      },
-    };
-  }
-
-  // …continue below…
-}
-```
-
-> **Key additions**:
->
-> - `"permissions"` field is now **required**.
-> - If you set `useNetwork: false`, any attempt to call `libp2p.handle(...)` in `setupProtocols()` will cause `initialize()` to return `false`.
-
----
-
-### 2. Initialization
-
-Override `initialize(context)` to store the context. Always call `super.initialize(context)` first to handle permission verification:
-
-```ts
-async initialize(context: PluginContext): Promise<boolean> {
-  const ok = await super.initialize(context);
-  if (!ok) return false;
-  this.context = context;
-  return true;
-}
-```
-
-> **Note:** You do **not** need to set `this.isInitialized = true` yourself—`super.initialize` already does that, after verifying requested vs. granted permissions.
-
----
-
-### 3. Protocol Handlers (`setupProtocols` + `handleProtocol`)
-
-- **`setupProtocols()`** is invoked inside `start()`. It’s where you bind your libp2p protocol strings to `handleProtocol()` or inline handlers.
-- **`handleProtocol()`** is called by the `PluginManager` whenever you receive an incoming libp2p stream that matches one of your declared protocols.
-
-```ts
-setupProtocols(): void {
-  if (!this.context?.libp2p) return;
-
-  // Bind "/video-metadata/1.0.0"
-  this.context.libp2p.handle(
-    "/video-metadata/1.0.0",
-    async ({ stream, connection }: any) => {
-      const remotePeerId = connection.remotePeer.toString();
-      await this.handleProtocol("/video-metadata/1.0.0", stream, remotePeerId);
-    }
-  );
-
-  // Bind "/video-discovery/1.0.0"
-  this.context.libp2p.handle(
-    "/video-discovery/1.0.0",
-    async ({ stream, connection }: any) => {
-      const remotePeerId = connection.remotePeer.toString();
-      await this.handleProtocol("/video-discovery/1.0.0", stream, remotePeerId);
-    }
-  );
-}
-
-async handleProtocol(
-  protocol: string,
-  stream: any,
-  peerId: string
-): Promise<void> {
-  if (protocol === "/video-metadata/1.0.0") {
-    // 1. Read request bytes from stream.source
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of stream.source) {
-      chunks.push(chunk);
-    }
-    const reqJson = new TextDecoder().decode(chunks[0]);
-    const request = JSON.parse(reqJson) as { cid: string };
-
-    // 2. Lookup stored metadata
-    const vidMd = this.videoMetadataStore.get(request.cid) || null;
-    const response = JSON.stringify({
-      type: "video-metadata-response",
-      cid: request.cid,
-      metadata: vidMd,
-    });
-
-    // 3. Send back via stream.sink
-    await stream.sink([new TextEncoder().encode(response)]);
-  } else if (protocol === "/video-discovery/1.0.0") {
-    // Similar pattern: read query, search, respond
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of stream.source) {
-      chunks.push(chunk);
-    }
-    const reqJson = new TextDecoder().decode(chunks[0]);
-    const query = JSON.parse(reqJson) as {
-      resolution?: string;
-      title?: string;
-    };
-
-    const matches: NetworkFileInfo[] = [];
-    for (const [cid, md] of this.videoMetadataStore.entries()) {
-      let match = true;
-      if (query.resolution && md.resolution !== query.resolution) match = false;
-      if (
-        query.title &&
-        !md.title?.toLowerCase().includes(query.title.toLowerCase())
-      )
-        match = false;
-      if (match) {
-        const fi = this.context!.files.get(cid)!;
-        matches.push({
-          ...fi,
-          peerId: this.context!.nodeId,
-          peerAddress: "local",
-          availability: "online",
-        });
-      }
-    }
-
-    const response = JSON.stringify({
-      type: "video-discovery-response",
-      results: matches,
-    });
-    await stream.sink([new TextEncoder().encode(response)]);
-  }
-}
-```
-
-> **Tip:** Always check `this.context?.libp2p` before trying to bind protocols. If you declared `useNetwork: false` in `permissions`, attempting to call `libp2p.handle(...)` will fail.
-
----
-
-### 4. Optional Hooks
-
-You can implement any subset of the following hooks to extend core behavior:
-
-#### a) `canHandleFile(file: FileInfo): boolean`
-
-Filter which uploaded/downloaded files your plugin cares about.
-
-```ts
-canHandleFile(file: FileInfo): boolean {
-  return file.type.startsWith("video/");
-}
-```
-
-#### b) `enhanceMetadata(file: UploadFile): Promise<any>`
-
-Called by core during `uploadFile()`. Return an object of custom metadata to merge into `FileInfo.metadata`.
-
-```ts
-async enhanceMetadata(file: UploadFile): Promise<VideoMetadata> {
-  // (Stub) derive metadata from filename; replace with real video-probe logic
-  const baseName = file.name.replace(/\.[^/.]+$/, "");
-  const metadata: VideoMetadata = {
-    title: baseName,
-    resolution: "1920x1080",
-    durationSeconds: 120,
-  };
-  return metadata;
-}
-```
-
-Core merges this into `FileInfo.metadata`, then triggers `onFileUploaded(cid, fileInfo)`.
-
-#### c) `onFileUploaded(cid: string, fileInfo: FileInfo): void`
-
-Called after **any** file upload finishes. Good for indexing or caching.
-
-```ts
-onFileUploaded(cid: string, fileInfo: FileInfo): void {
-  if (this.canHandleFile(fileInfo) && fileInfo.metadata) {
-    this.videoMetadataStore.set(cid, fileInfo.metadata as VideoMetadata);
-    this.emit("videoFileIndexed", { cid, metadata: fileInfo.metadata });
-  }
-}
-```
-
-#### d) `onFileDownloaded(cid: string): void`
-
-Called whenever someone calls `node.downloadFile(cid)`. If you want to auto-pin or cache the video, implement here.
-
-```ts
-onFileDownloaded(cid: string): void {
-  if (this.videoMetadataStore.has(cid)) {
-    this.context!.pinFile(cid).catch(console.error);
-  }
-}
-```
-
-#### e) `onPeerConnected(peerId: string, peer: PeerInfo): void`
-
-Fires whenever a peer connects. You can identify or tag peers as “video nodes”:
-
-```ts
-async identifyPeer(peerId: string): Promise<boolean> {
-  try {
-    await this.context!.libp2p.dialProtocol(peerId, "/video-metadata/1.0.0");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-onPeerConnected(peerId: string, peer: PeerInfo): void {
-  this.identifyPeer(peerId).then((isVideoNode) => {
-    if (isVideoNode && this.context) {
-      peer.isVideoNode = true; // hypothetical field
-      this.emit("videoPeerConnected", { peerId });
-    }
-  });
-}
-```
-
-#### f) `searchFiles(query: any): Promise<NetworkFileInfo[]>`
-
-If your plugin wants to provide search results when core’s `vinyl.searchFiles(query)` is called, implement this:
-
-```ts
-async searchFiles(query: any): Promise<NetworkFileInfo[]> {
-  if (typeof query !== "object") return [];
-  const results: NetworkFileInfo[] = [];
-  for (const [cid, md] of this.videoMetadataStore.entries()) {
-    let match = true;
-    if (query.resolution && md.resolution !== query.resolution) match = false;
-    if (
-      query.title &&
-      !md.title?.toLowerCase().includes((query.title as string).toLowerCase())
-    )
-      match = false;
-    if (match) {
-      const fi = this.context!.files.get(cid)!;
-      results.push({
-        ...fi,
-        peerId: this.context!.nodeId,
-        peerAddress: "local",
-        availability: "online",
-      });
-    }
-  }
-  return results;
-}
-```
-
-#### g) `getRecommendations(basedOnCid: string): Promise<NetworkFileInfo[]>`
-
-Optional recommendation engine (e.g. “videos of similar resolution”).
-
-```ts
-async getRecommendations(basedOnCid: string): Promise<NetworkFileInfo[]> {
-  const baseMd = this.videoMetadataStore.get(basedOnCid);
-  if (!baseMd) return [];
-
-  const recs: NetworkFileInfo[] = [];
-  for (const [cid, md] of this.videoMetadataStore.entries()) {
-    if (cid === basedOnCid) continue;
-    if (md.resolution === baseMd.resolution) {
-      const fi = this.context!.files.get(cid)!;
-      recs.push({
-        ...fi,
-        peerId: this.context!.nodeId,
-        peerAddress: "local",
-        availability: "online",
-      });
-    }
-  }
-  return recs.slice(0, 10);
-}
-```
-
-> **Note:** Core’s `vinyl.getRecommendations(cid)` automatically invokes every plugin’s `getRecommendations(...)` and aggregates their results.
-
----
-
-### 5. HTTP Endpoints (if applicable)
-
-If your plugin needs to expose REST endpoints, implement:
-
-```ts
-getHttpNamespace(): string {
-  return "/api/video";
-}
-
-getHttpRouter(): Express | Router {
-  const router = express.Router();
-
-  /**
-   * GET /api/video/metadata/:cid
-   * → Return raw VideoMetadata for the given file CID.
-   */
-  router.get("/metadata/:cid", (req: Request, res: Response) => {
-    const { cid } = req.params;
-    const md = this.videoMetadataStore.get(cid) || null;
-    if (!md) {
-      return res.status(404).json({ error: `No metadata for CID ${cid}` });
-    }
-    return res.json(md);
-  });
-
-  /**
-   * GET /api/video/search?resolution=1080p&title=demo
-   * → Return search results by resolution/title.
-   */
-  router.get("/search", async (req: Request, res: Response) => {
-    const query: any = {};
-    if (req.query.resolution) query.resolution = String(req.query.resolution);
-    if (req.query.title) query.title = String(req.query.title);
-    try {
-      const results = await this.searchFiles(query);
-      return res.json({ results });
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message });
-    }
-  });
-
-  return router;
-}
-```
-
-> **Important:** The CLI’s `WebServer` (in `vinyl-peer-cli`) will mount each plugin’s router under its namespace. For example, hitting `http://localhost:3001/api/video/metadata/<cid>` will route to your handler.
-
----
-
-## Registering & Running Your Plugin
-
-1. **Build your plugin**:
+1. **Clone the Repository**
 
    ```bash
-   cd packages/vinyl-peer-video-plugin
-   npm run build
-   # or from root:
-   npm run build --workspace=vinyl-peer-video-plugin
+   git clone https://github.com/your-org/vinyl-peer-monorepo.git
+   cd vinyl-peer-monorepo
    ```
 
-   This compiles `src/VideoPlugin.ts` → `dist/esm/index.js` and `dist/cjs/index.js`.
+2. **Install Dependencies**
 
-2. **Modify the CLI launcher** to include your plugin in the `new Vinyl([...])` array. For example, in `packages/vinyl-peer-cli/src/run-vinyl.ts`:
-
-   ```ts
-   import { VideoPlugin } from "vinyl-peer-video-plugin/dist/esm/index.js";
-   import { MusicPlugin } from "vinyl-peer-music-plugin/dist/esm/index.js";
-   import { AnalyticsPlugin } from "vinyl-peer-analytics/dist/esm/index.js";
-   import { ReplicationPlugin } from "vinyl-peer-replication-plugin/dist/esm/index.js";
-   // …other imports…
-
-   async function main() {
-     const vinyl = new Vinyl([
-       new MusicPlugin(),
-       new AnalyticsPlugin(),
-       new ReplicationPlugin(),
-       new VideoPlugin(), // <-- your plugin
-     ]);
-
-     // … initialize, start WebServer, etc.
-   }
-   ```
-
-3. **Run a node with your plugin**:
+   - Vinyl Peer uses `pnpm` as its package manager for efficient monorepo management.
 
    ```bash
-   npm run start --workspace=vinyl-peer-cli -- --web-server
+   pnpm install
    ```
 
-   - You should see console logs indicating your plugin’s registration, protocol binding, and startup.
-   - Verify your HTTP endpoints, e.g.:
+3. **Build All Packages**
 
-     ```
-     http://localhost:3001/api/video/metadata/<cid>
-     ```
+   - Compile TypeScript code across all packages.
 
-4. **Test libp2p protocols**:
+   ```bash
+   pnpm run build
+   ```
 
-   - Run two or more Vinyl nodes (each with your plugin) on different hosts or ports.
-   - From Node B, call:
-
-     ```ts
-     await vinyl.libp2p.dialProtocol(peerIdA, "/video-metadata/1.0.0");
-     ```
-
-     to check if peer A responds with stored metadata.
+4. **Verify Installation**
+   - Ensure the build completes without errors. If issues arise, see [Troubleshooting](#troubleshooting).
 
 ---
 
-## Testing & Debugging
+## Execution Commands
 
-- **Unit Tests**:
+Run these commands from the monorepo root using `pnpm`. They interact with the `vinyl-peer-cli` package.
 
-  - Write Jest or Mocha tests (in a `test/` folder) to validate your plugin’s methods in isolation.
-  - Mock `PluginContext` by passing a minimal stub that implements `getPermissions()` + required fields.
+### General Commands
 
-- **Console Logging**:
+- **Start the Node**
+  - Launches the Vinyl node and HTTP server.
+  ```bash
+  pnpm run start --workspace=vinyl-peer-cli
+  ```
 
-  - Add `console.log(...)` inside `initialize`, `setupProtocols`, and any hook methods to confirm execution.
+### File Management Commands
 
-- **HTTP Endpoint Testing**:
+- **Upload a File**
 
-  - Use `curl`, Postman, or your browser to hit `/api/<your-namespace>/…` and verify JSON responses.
+  - Uploads a file to the network with an optional storage mode (`ipfs` or local).
 
-- **Protocol Testing**:
+  ```bash
+  pnpm run cli -- upload <file-path> --storage-mode ipfs
+  ```
 
-  - In a separate script or REPL, import `libp2p` and manually dial your plugin’s protocol to a known peer.
+- **Download a File**
 
-- **Network Simulation**:
+  - Retrieves a file by its CID and saves it to a specified path.
 
-  - Run two Vinyl nodes (each with your plugin) on different hosts or ports.
-  - Upload a video file on Node A; Node B should discover it via libp2p protocols (assuming you implement broadcast or DHT).
-  - Observe logs in each node’s `onFileUploaded` or `onFileDownloaded`.
+  ```bash
+  pnpm run cli -- download <cid> <output-path>
+  ```
+
+- **Search for Files**
+
+  - Queries the network for files matching a search term.
+
+  ```bash
+  pnpm run cli -- search <query>
+  ```
+
+- **Pin a File**
+
+  - Pins a file by CID to ensure local availability (requires IPFS mode).
+
+  ```bash
+  pnpm run cli -- pin <cid>
+  ```
+
+- **Unpin a File**
+  - Removes a file from the local pin set.
+  ```bash
+  pnpm run cli -- unpin <cid>
+  ```
+
+### Plugin-Specific Commands
+
+- **Analytics Stats**
+  ```bash
+  pnpm run cli -- analytics stats
+  ```
+- **Post a Microblog Update**
+  ```bash
+  pnpm run cli -- v post "Hello from Vinyl Peer!"
+  ```
 
 ---
 
-## Plugin Publishing & Versioning
+## Code Examples
 
-1. Bump your plugin’s version in `package.json` (e.g., `"version": "1.1.0"`).
+Below are detailed examples demonstrating how to use Vinyl Peer programmatically.
 
-2. Tag your commit:
+### Uploading a File
 
-   ```bash
-   git tag v1.1.0
-   git push --tags
-   ```
+```typescript
+import { Vinyl } from "vinyl-peer-protocol";
+import { NodeFile } from "vinyl-peer-cli";
+import fs from "fs/promises";
 
-3. Publish to npm (ensure name is unique):
+// Initialize the Vinyl node with IPFS support
+const vinyl = new Vinyl();
+await vinyl.initialize(true); // true enables Helia/IPFS
 
-   ```bash
-   cd packages/vinyl-peer-video-plugin
-   npm publish --access public
-   ```
+// Read and prepare the file
+const fileBuffer = await fs.readFile("path/to/song.mp3");
+const nodeFile = new NodeFile(fileBuffer, "song.mp3", "audio/mpeg");
 
-4. Consumers can then:
+// Upload the file
+const cid = await vinyl.uploadFile(nodeFile, "ipfs");
+console.log(`File uploaded with CID: ${cid}`);
+```
 
-   ```bash
-   npm install vinyl-peer-video-plugin
-   ```
+### Downloading a File
 
-   and add `new VideoPlugin()` to their Vinyl node.
+```typescript
+import { Vinyl } from "vinyl-peer-protocol";
+import fs from "fs/promises";
+
+const vinyl = new Vinyl();
+await vinyl.initialize(true);
+
+const cid = "Qm..."; // Replace with actual CID
+const data = await vinyl.downloadFile(cid);
+if (data) {
+  await fs.writeFile("downloaded-song.mp3", data);
+  console.log("File downloaded successfully");
+}
+```
+
+### Searching for Files
+
+```typescript
+import { Vinyl } from "vinyl-peer-protocol";
+
+const vinyl = new Vinyl();
+await vinyl.initialize(true);
+
+const results = await vinyl.searchFiles("genre:jazz year:1960");
+console.log("Search results:", results);
+```
+
+### Using the Generated SDK
+
+```typescript
+import { createSdkClient } from "generated-sdk/sdk";
+
+const client = createSdkClient("http://localhost:3001");
+
+// Search for music
+const musicResults = await client.post("/api/music/search", { genre: "rock" });
+console.log("Rock music results:", musicResults);
+
+// Get analytics
+const stats = await client.get("/api/analytics/stats");
+console.log("Network stats:", stats);
+```
+
+### Posting a Microblog Update
+
+```typescript
+import { Vinyl } from "vinyl-peer-protocol";
+
+const vinyl = new Vinyl();
+await vinyl.initialize(true);
+
+await vinyl.plugins["v"].post("Check out my new track!");
+console.log("Microblog post created");
+```
 
 ---
 
@@ -908,147 +557,92 @@ getHttpRouter(): Express | Router {
 
 ### 1. `vinyl-peer-protocol` (Core)
 
-- **Purpose**:
-
-  - Manages Libp2p node lifecycle, Helia/IPFS integration, file upload/download encryption, and the plugin framework.
-  - Exposes an API for uploading/downloading, pin/unpin, searching, and event subscription.
-
-- **Key Files/Modules**:
-
-  - `Vinyl.ts`: Core `Vinyl` class (P2P node + storage + plugin management)
-  - `PluginInterface.ts`: Defines `PluginContext`, `VinylPeerPlugin`, `PluginCapabilities`, `PluginPermissions`, `BasePlugin`, etc.
-  - `PluginManager.ts`: Registers plugins, routes protocols, and propagates events.
-  - `types.ts`: Shared types (`PeerInfo`, `FileInfo`, `NetworkFileInfo`, `NodeStats`, `StorageMode`, `UploadFile`).
-
-- **README**: [packages/vinyl-peer-protocol/README.md](./packages/vinyl-peer-protocol/README.md)
-
----
-
-### 2. `vinyl-peer-music-plugin`
-
-- **Purpose**: Music-specific functionality.
-
+- **Purpose**: Foundation of the Vinyl Peer system.
 - **Features**:
+  - Initializes and manages the libp2p node.
+  - Optional Helia/IPFS integration for storage.
+  - File upload, download, pinning, and search APIs.
+  - Plugin registration and lifecycle management.
+- **Dependencies**: `libp2p`, `@helia/ipfs`.
 
-  - Metadata extraction (artist, title, year, genre) from filenames and ID3 tags.
-  - Search engine for local music files (`searchFiles(query: MusicDiscoveryQuery)`).
-  - Simple recommendation engine (`getRecommendations(basedOnCid)`).
-  - HTTP endpoints under `/api/music`:
+### 2. `vinyl-peer-plugin-music`
 
-    - `GET  /recommendations/:cid` → Get recommendations.
-    - `GET  /stats` → Music stats (counts, top artists/genres).
-    - `GET  /metadata/:cid` → Raw music metadata by CID.
-    - `GET  /all` → List all local audio files.
-
-- **README**: [packages/vinyl-peer-music-plugin/README.md](./packages/vinyl-peer-music-plugin/README.md)
-
----
-
-### 3. `vinyl-peer-analytics`
-
-- **Purpose**: Collect and expose node-level analytics.
-
+- **Purpose**: Enhances music file handling.
 - **Features**:
+  - Extracts ID3 tags (artist, album, genre).
+  - Search by metadata fields.
+  - Basic recommendation engine based on shared files.
+- **HTTP Routes**: `/api/music/search`, `/api/music/recommend`.
 
-  - Periodic snapshots of metrics: peer counts, file counts, storage usage, pin counts, bandwidth.
-  - HTTP endpoints under `/api/analytics`:
+### 3. `vinyl-peer-plugin-analytics`
 
-    - `GET  /stats` → Current node stats (peers, files, storage, pins).
-    - `GET  /peers` → List known peers and their statuses.
-    - `GET  /files` → List local and network files with metadata.
-
-- **README**: [packages/vinyl-peer-analytics/README.md](./packages/vinyl-peer-analytics/README.md)
-
----
-
-### 4. `vinyl-peer-replication-plugin`
-
-- **Purpose**: Auto-pin (auto-replicate) any file you download.
-
+- **Purpose**: Provides network and file insights.
 - **Features**:
+  - Tracks active peers, file downloads, and pinned CIDs.
+  - Exposes statistics via HTTP.
+- **HTTP Routes**: `/api/analytics/stats`.
 
-  - Hooks into `onFileDownloaded(cid)` to call `context.pinFile(cid)` when enabled.
-  - HTTP endpoints under `/replication`:
+### 4. `vinyl-peer-plugin-replication`
 
-    - `GET  /status` → `{ enabled: boolean }`
-    - `POST /on` → Turn auto-pin ON
-    - `POST /off` → Turn auto-pin OFF
-
-- **How It Works**:
-
-  1. **Initialization**: Stores `PluginContext` (which now includes `pinFile`/`unpinFile`).
-  2. **onFileDownloaded(...)**: If enabled, automatically calls `context.pinFile(cid)`.
-  3. **HTTP Routes**: Toggle the `enabled` flag at runtime via `POST /on` or `POST /off`.
-
-- **README**: [packages/vinyl-peer-replication-plugin/README.md](./packages/vinyl-peer-replication-plugin/README.md)
-
----
-
-### 5. `vinyl-peer-cli` (CLI & Web Server)
-
-- **Purpose**:
-
-  - Provides a command-line interface for interacting with a Vinyl node.
-  - Runs an Express web server to expose core + plugin HTTP endpoints on port 3001 by default.
-
+- **Purpose**: Ensures file availability.
 - **Features**:
+  - Auto-pins files on download (configurable).
+  - Toggle replication via CLI or HTTP.
+- **HTTP Routes**: `/api/replication/config`.
 
-  - CLI commands: `start`, `upload <file>`, `download <cid>`, `pin <cid>`, `unpin <cid>`, `search <term>`
-  - `WebServer.ts`: Instantiates an Express app, mounts each plugin’s HTTP routes under its namespace, and starts listening.
+### 5. `vinyl-peer-plugin-sdk-generator`
 
----
+- **Purpose**: Simplifies client development.
+- **Features**:
+  - Generates a TypeScript SDK based on core and plugin HTTP routes.
+  - Outputs typed client methods (e.g., `client.post("/api/music/search")`).
+- **Output**: `generated-sdk/sdk.ts`.
 
-## CORS & Helmet in `WebServer.ts`
+### 6. `vinyl-peer-plugin-v`
 
-The CLI’s Express app in `vinyl-peer-cli` uses CORS and Helmet to secure plugin endpoints. Example:
+- **Purpose**: Adds decentralized microblogging.
+- **Features**:
+  - Post short messages or media links.
+  - Follow peers and view timelines via libp2p PubSub.
+- **HTTP Routes**: `/api/v/post`, `/api/v/timeline`.
 
-```ts
-import express from "express";
-import cors from "cors";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
+### 7. `vinyl-peer-plugin-rs`
 
-const app = express();
+- **Purpose**: Enhances file resilience.
+- **Features**:
+  - Splits files into Reed-Solomon encoded shards.
+  - Reconstructs files from partial shard sets.
+- **HTTP Routes**: `/api/rs/shard`, `/api/rs/recover`.
 
-// Replace the origin array with your actual front-end domains (e.g. "https://app.example.com")
-app.use(
-  cors({
-    origin: ["https://app.example.com", "https://dashboard.example.com"],
-    methods: ["GET", "POST", "PUT", "DELETE"],
-    credentials: true,
-  }),
-);
+### 8. `vinyl-peer-cli`
 
-app.use(helmet());
-
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many requests – try again later." },
-});
-
-app.use(limiter);
-
-// Mount each plugin’s router under its namespace here
-// e.g. app.use("/api/music", musicPlugin.getHttpRouter());
-// …
-```
-
-- **CORS `origin`**: Specify the browser origins you trust (e.g. your front-end’s domain). This is not a path on each peer; it’s the list of allowed domains that may make cross-origin requests.
-- **Helmet**: Adds standard security headers.
-- **Rate Limiter**: Protects against brute-force or DoS by limiting requests per IP.
+- **Purpose**: Provides user interaction tools.
+- **Features**:
+  - CLI for node management (upload, download, etc.).
+  - Express-based HTTP server hosting core and plugin routes.
+- **Default Port**: `3001`.
 
 ---
 
 ## Contributing
 
-We welcome contributions! Please see the [Contributing Guidelines](CONTRIBUTING.md) for details on:
+Contributions are welcome! To get started:
 
-- Setting up your development environment
-- Coding conventions & styling
-- Submitting pull requests & issue reporting
+1. Fork the repository.
+2. Create a feature branch (`git checkout -b feature/my-feature`).
+3. Commit changes (`git commit -m "Add my feature"`).
+4. Push to your fork (`git push origin feature/my-feature`).
+5. Open a pull request.
+
+See [Contributing Guidelines](CONTRIBUTING.md) for more details.
+
+---
+
+## Troubleshooting
+
+- **Build Fails**: Ensure `pnpm` is installed (`npm install -g pnpm`) and run `pnpm install` again.
+- **Node Won’t Start**: Check for port conflicts (default: `3001`) and ensure dependencies are built (`pnpm run build`).
+- **IPFS Issues**: Verify Helia/IPFS is enabled and properly configured in `vinyl-peer-protocol`.
 
 ---
 
