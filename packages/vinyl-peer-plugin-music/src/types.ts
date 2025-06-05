@@ -1,5 +1,5 @@
 /**
- * MusicMetadata: All the fields our plugin knows about for each audio file.
+ * MusicMetadata: All fields known about an audio file.
  */
 export interface MusicMetadata {
   artist?: string;
@@ -7,14 +7,14 @@ export interface MusicMetadata {
   title?: string;
   genre?: string;
   year?: number;
-  duration?: number; // In seconds (if known)
+  duration?: number; // seconds
   bpm?: number;
   mood?: string;
   tags?: string[];
 }
 
 /**
- * MusicDiscoveryQuery: Filter parameters for searching music files.
+ * MusicDiscoveryQuery: Filter parameters for searching music.
  */
 export interface MusicDiscoveryQuery {
   artist?: string;
@@ -27,11 +27,32 @@ export interface MusicDiscoveryQuery {
 }
 
 /**
- * MusicRecommendation: The shape of each recommendation returned to clients.
+ * MusicRecommendation: Returned recommendation object.
  */
 export interface MusicRecommendation {
   cid: string;
   score: number;
   reason: string;
   metadata: MusicMetadata;
+}
+
+/**
+ * Playlist entry.
+ */
+export interface Playlist {
+  name: string;
+  ownerPeer: string;
+  trackCids: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Announcement payload for PubSub.
+ */
+export interface AnnouncementPayload {
+  type: "new-track";
+  cid: string;
+  metadata: MusicMetadata;
+  peerId: string;
 }

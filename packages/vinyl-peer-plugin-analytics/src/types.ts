@@ -6,7 +6,6 @@ export interface AnalyticsSnapshot {
   totalPeers: number;
   totalConnectedPeers: number;
   totalFiles: number;
-  totalMusicFiles: number;
   totalPinCount: number;
 }
 

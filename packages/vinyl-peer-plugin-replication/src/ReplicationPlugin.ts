@@ -53,7 +53,6 @@ export class ReplicationPlugin extends BasePlugin {
 
     if (this.autoPinRemote) {
       try {
-        // In recent libp2p, the pubsub service is under libp2p.services.pubsub
         const pubsub = this.context.libp2p.services.pubsub;
         if (!pubsub) {
           throw new Error("ReplicationPlugin: pubsub service is not available on libp2p");
@@ -99,7 +98,7 @@ export class ReplicationPlugin extends BasePlugin {
   }
 
   onFileDownloaded(cid: string): void {
-    // 1) If autoPinLocal is on, pin locally
+    // If autoPinLocal is on, pin locally
     if (this.autoPinLocal && this.enabled) {
       this.context
         .pinFile(cid)
@@ -107,7 +106,7 @@ export class ReplicationPlugin extends BasePlugin {
         .catch((err: any) => console.error(`ReplicationPlugin: kon niet pinnen "${cid}":`, err));
     }
 
-    // 2) If autoPinRemote is on, broadcast to peers so they can pin as well
+    // If autoPinRemote is on, broadcast to peers so they can pin as well
     if (this.autoPinRemote && this.enabled) {
       const pubsub = this.context.libp2p.services.pubsub;
       if (!pubsub) {
@@ -145,6 +144,26 @@ export class ReplicationPlugin extends BasePlugin {
     router.post("/off", (_req, res) => {
       this.enabled = false;
       res.json({ enabled: false, message: "Auto-replication is now OFF." });
+    });
+
+    router.post("/autopin/local/off", (_req, res) => {
+      this.autoPinLocal = false;
+      res.json({ enabled: this.autoPinLocal, message: "Auto-pinning local is now OFF." });
+    });
+
+    router.post("/autopin/local/on", (_req, res) => {
+      this.autoPinLocal = true;
+      res.json({ enabled: this.autoPinLocal, message: "Auto-pinning local is now ON." });
+    });
+
+    router.post("/autopin/remote/off", (_req, res) => {
+      this.autoPinRemote = false;
+      res.json({ enabled: this.autoPinRemote, message: "Auto-pinning remote is now OFF." });
+    });
+
+    router.post("/autopin/remote/on", (_req, res) => {
+      this.autoPinRemote = true;
+      res.json({ enabled: this.autoPinRemote, message: "Auto-pinning remote is now ON." });
     });
 
     return router;

@@ -433,7 +433,7 @@ export class Vinyl {
   async initialize(enableLocalStorage: boolean = true, origin?: string[]): Promise<boolean> {
     try {
       console.log("Vinyl: Initializing LevelDB for file metadata…");
-      // 1) Open (or create) LevelDB under "./vinyl-filedb"
+
       this.fileDb = new Level<string, FileInfo>(path.join(__dirname, "vinyl-filedb"), {
         valueEncoding: "json",
       });
@@ -442,13 +442,10 @@ export class Vinyl {
       this.localStorageEnabled = enableLocalStorage;
       this.origin = origin || ["*"];
 
-      // 2) Build transports & addresses
       const { addresses, transports } = await this.getTransportsAndAddresses();
 
-      // 3) Build peer discovery modules
       const peerDiscoveryServices = await this.getPeerDiscoveryServices();
 
-      // 4) Construct the libp2p node (with Gossipsub)
       this.libp2p = await createLibp2p({
         addresses,
         transports,
@@ -459,19 +456,16 @@ export class Vinyl {
           identify: identify(),
           dht: kadDHT({ clientMode: this.isBrowser() }),
           ping: ping(),
-          // corrected prop: allowPublishToZeroTopicPeers
           pubsub: gossipsub({ allowPublishToZeroTopicPeers: true }),
           ...peerDiscoveryServices,
         },
       });
 
-      // 5) Generate or import AES‐GCM key (initial rotation)
       await this.rotateEncryptionKey();
 
-      // 6) If localStorage enabled, initialize Helia (IPFS) & UnixFS with LevelBlockstore
+      // If localStorage enabled, initialize Helia (IPFS) & UnixFS with LevelBlockstore
       if (this.localStorageEnabled) {
         console.log("Vinyl: Initializing Helia (IPFS) node with LevelBlockstore…");
-        // Persist blocks under "./helia-repo"
         this.helia = await createHelia({
           libp2p: this.libp2p,
           blockstore: new LevelBlockstore(path.join(__dirname, "helia-repo")),
@@ -481,11 +475,10 @@ export class Vinyl {
         console.log("Vinyl: Local storage disabled → relay-only mode");
       }
 
-      // 7) Build PluginContext
       const pluginContext: PluginContext = {
         nodeId: this.libp2p.peerId.toString(),
         libp2p: this.libp2p,
-        files: this.filesView(), // pass an async iterator‐backed “view” of fileDb
+        files: this.filesView(),
         peers: this.peers,
         networkFiles: this.networkFiles,
         emit: (event, envelope) => {
@@ -508,10 +501,10 @@ export class Vinyl {
         fileDb: this.fileDb!,
         pluginManager: this.pluginManager,
         httpApp: this.httpApp,
+        onEvent: this.onEvent.bind(this),
       };
       this.pluginManager.setContext(pluginContext);
 
-      // 8) Register each plugin instance
       for (const plugin of this.pluginInstances) {
         const caps = plugin.getCapabilities();
         console.log(`Vinyl: registering plugin "${caps.name}" v${caps.version}…`);
@@ -528,12 +521,10 @@ export class Vinyl {
         }
       }
 
-      // 9) Listen for libp2p events, then start libp2p
       this.setupEventListeners();
       await this.libp2p.start();
       this.nodeStarted = true;
 
-      // 10) Start plugins
       await this.pluginManager.startAllPlugins();
 
       console.log(`Vinyl: Node started with ID: ${this.libp2p.peerId.toString()}`);
@@ -544,7 +535,6 @@ export class Vinyl {
         payload: { nodeId: this.libp2p.peerId.toString() },
       });
 
-      // Schedule daily key rotation
       setInterval(
         () => {
           this.rotateEncryptionKey().catch((err) => {
@@ -569,7 +559,6 @@ export class Vinyl {
    * async‐iterator of all values in LevelDB.
    */
   private filesView(): Map<string, FileInfo> {
-    // Return a pseudo‐Map backed by LevelDB:
     const pseudoMap = new Map<string, FileInfo>();
     (async () => {
       for await (const [cid, info] of this.fileDb.iterator()) {
@@ -681,13 +670,12 @@ export class Vinyl {
 
     this.cryptoKeys.set(this.currentKeyVersion, newKey);
 
-    // Keep only the last 3 key versions
+    // Keep only the last 3 key versions // TO-DO recovery after key rotation, since we can’t decrypt old files
     if (this.cryptoKeys.size > 3) {
       const oldest = Math.min(...Array.from(this.cryptoKeys.keys()));
       this.cryptoKeys.delete(oldest);
     }
 
-    // Log the rotation
     await this.signAndAppend({
       timestamp: new Date().toISOString(),
       event: "keyRotation",
@@ -725,8 +713,7 @@ export class Vinyl {
     const results: NetworkFileInfo[] = [];
     const searchTerm = query.toLowerCase();
 
-    // 1) Local files: iterate LevelDB
-    for await (const [cid, fileInfo] of this.fileDb.iterator()) {
+    for await (const [_, fileInfo] of this.fileDb.iterator()) {
       if (fileInfo.name.toLowerCase().includes(searchTerm)) {
         results.push({
           ...fileInfo,
@@ -737,14 +724,12 @@ export class Vinyl {
       }
     }
 
-    // 2) Network files: match on file.name only
     for (const file of this.networkFiles.values()) {
       if (file.name.toLowerCase().includes(searchTerm)) {
         results.push(file);
       }
     }
 
-    // 3) Plugin‐provided search
     const pluginResults = await this.pluginManager.searchFiles(query);
     results.push(...pluginResults);
 
@@ -787,10 +772,8 @@ export class Vinyl {
         throw new Error("Encryption key is not initialized");
       }
 
-      // 1) Read raw bytes
       const arrayBuffer = await file.arrayBuffer();
 
-      // 2) Encrypt with AES‐GCM (version byte + IV)
       const iv = this.isBrowser()
         ? window.crypto.getRandomValues(new Uint8Array(12))
         : crypto.webcrypto.getRandomValues(new Uint8Array(12));
@@ -808,7 +791,6 @@ export class Vinyl {
           );
       const ciphertext = new Uint8Array(encryptedBuffer);
 
-      // Build [version(1) | IV(12) | ciphertext]
       const versionByte = new Uint8Array([this.currentKeyVersion]);
       const combined = new Uint8Array(1 + iv.byteLength + ciphertext.byteLength);
       combined.set(versionByte, 0);
@@ -818,7 +800,6 @@ export class Vinyl {
       let storedCID: string;
       let storedStreamId: string | undefined;
 
-      // 3) Store encrypted blob
       if (storageMode === "ipfs" && this.localStorageEnabled) {
         const ipfsCID = await this.fs.addBytes(combined);
         storedCID = ipfsCID.toString();
@@ -829,7 +810,6 @@ export class Vinyl {
         this.announceStream(storedStreamId, file.name, file.size);
       }
 
-      // 4) Let plugins add metadata
       let finalMetadata: any = {};
       const pluginMetadata = await this.pluginManager.enhanceFileMetadata(file);
       finalMetadata = { ...pluginMetadata };
@@ -838,7 +818,6 @@ export class Vinyl {
         finalMetadata = { ...finalMetadata, ...metadata };
       }
 
-      // 5) Build metadata JSON object
       const metadataObject = {
         name: file.name,
         size: file.size,
@@ -849,7 +828,6 @@ export class Vinyl {
         metadata: finalMetadata,
       };
 
-      // 6) Store metadata JSON on Helia or in‐memory
       let metadataCID: string;
       let metadataStreamId: string | undefined;
       if (storageMode === "ipfs" && this.localStorageEnabled) {
@@ -863,7 +841,6 @@ export class Vinyl {
         this.streamingFiles.set(metadataStreamId, metadataBytes);
       }
 
-      // 7) Construct FileInfo, persist in LevelDB, notify plugins, emit event
       const fileInfo: FileInfo = {
         cid: metadataCID,
         name: file.name,
@@ -878,7 +855,6 @@ export class Vinyl {
         metadata: finalMetadata,
       };
 
-      // Persist into LevelDB
       await this.fileDb.put(metadataCID, fileInfo);
 
       this.pluginManager.notifyFileUploaded(metadataCID, fileInfo);
@@ -917,7 +893,6 @@ export class Vinyl {
         throw new Error("Encryption key is not initialized");
       }
 
-      // 1) Check if this is a metadataCID (levelDB contains FileInfo)
       let fileInfo: FileInfo | null = null;
       try {
         fileInfo = await this.fileDb.get(cid);
@@ -945,7 +920,6 @@ export class Vinyl {
         }
       }
 
-      // 2) Otherwise, it’s a raw encrypted blob
       let encryptedData: Uint8Array | undefined;
       if (cid.startsWith("stream-")) {
         const streamId = cid.replace(/^stream-/, "");
@@ -968,7 +942,6 @@ export class Vinyl {
         encryptedData = new Uint8Array(all);
       }
 
-      // 3) Decrypt
       const decrypted = await this.decryptFileData(encryptedData!);
       this.pluginManager.notifyFileDownloaded(cid);
       return decrypted;

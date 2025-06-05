@@ -21,6 +21,11 @@
       "vinyl-peer-plugin-rs": ["vinyl-peer-plugin-rs/dist"],
       "vinyl-peer-plugin-sdk-generator": ["vinyl-peer-plugin-sdk-generator/dist"],
       "vinyl-peer-plugin-v": ["vinyl-peer-plugin-v/dist"],
+      "vinyl-peer-plugin-monitor": ["vinyl-peer-plugin-monitor/dist"],
+      "vinyl-peer-plugin-filecoin-bridge": ["vinyl-peer-plugin-filecoin-bridge/dist"],
+      "vinyl-peer-plugin-auto-replication": ["vinyl-peer-plugin-auto-replication/dist"],
+      "vinyl-peer-plugin-nameservice": ["vinyl-peer-plugin-nameservice/dist"],
+      "vinyl-peer-plugin-advanced-sharding": ["vinyl-peer-plugin-advanced-sharding/dist"],
     },
     "declaration": true
   },

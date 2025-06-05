@@ -80,7 +80,6 @@ export interface PluginPermissions {
   useNetwork: boolean;
   modifyPeers: boolean;
   exposeHttp?: boolean;
-  // future fine‐grained options...
 }
 
 /**
@@ -111,6 +110,7 @@ export interface PluginContext {
   helia: Helia;
   pluginManager: PluginManager;
   httpApp?: Express;
+  onEvent: (callback: (event: string, envelope: { source: string; payload: any }) => void) => void;
 }
 
 /**

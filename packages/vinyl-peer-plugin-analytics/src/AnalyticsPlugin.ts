@@ -90,9 +90,6 @@ export class AnalyticsPlugin extends BasePlugin implements VinylPeerPlugin {
       (p) => p.status === "connected",
     ).length;
     const totalFiles = this.context.files.size;
-    const musicFiles = Array.from(this.context.files.values()).filter((f: FileInfo) =>
-      f.type.startsWith("audio/"),
-    ).length;
     const totalPinCount = Array.from(this.context.files.values()).filter(
       (f) => f.pinned === true,
     ).length;
@@ -102,7 +99,6 @@ export class AnalyticsPlugin extends BasePlugin implements VinylPeerPlugin {
       totalPeers,
       totalConnectedPeers,
       totalFiles,
-      totalMusicFiles: musicFiles,
       totalPinCount,
     };
 

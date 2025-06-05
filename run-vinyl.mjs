@@ -3,17 +3,25 @@ import { MusicPlugin } from "./packages/vinyl-peer-plugin-music/dist/esm/index.j
 import { AnalyticsPlugin } from "./packages/vinyl-peer-plugin-analytics/dist/esm/index.js";
 import { ReplicationPlugin } from "./packages/vinyl-peer-plugin-replication/dist/esm/index.js";
 import { ReedSolomonPlugin } from "./packages/vinyl-peer-plugin-rs/dist/esm/index.js";
+import { NameServicePlugin } from "./packages/vinyl-peer-plugin-name-service/dist/esm/index.js";
 import { SdkGeneratorPlugin } from "./packages/vinyl-peer-plugin-sdk-generator/dist/esm/index.js";
 import { VPlugin } from "./packages/vinyl-peer-plugin-v/dist/esm/VPlugin.js";
+import { MonitorPlugin } from "./packages/vinyl-peer-plugin-monitor/dist/esm/index.js";
+import { AutoReplicationPlugin } from "./packages/vinyl-peer-plugin-auto-replication/dist/esm/index.js";
+import { AdvancedShardingPlugin } from "./packages/vinyl-peer-plugin-advanced-sharding/dist/esm/index.js";
 
 async function main() {
   // 1) Instantiate Vinyl with only the “normal” plugins (no SDK‐generator yet)
   const vinyl = new Vinyl([
     new MusicPlugin(),
     new AnalyticsPlugin(),
+    new NameServicePlugin(),
     new ReplicationPlugin(),
+    new MonitorPlugin(),
     new ReedSolomonPlugin(),
-    new VPlugin()
+    new VPlugin(),
+    new AutoReplicationPlugin(),
+    new AdvancedShardingPlugin()
   ]);
 
   // 2) Initialize (this starts libp2p, Helia, plugin.initialize + plugin.start() for each)

@@ -50,7 +50,6 @@ export class PluginManager {
         // Attach a wrapped handler → validate protocol and peer identity
         this.context.libp2p.handle(protocol, async ({ stream, connection }: any) => {
           try {
-            // 3a) Peer authentication
             if (plugin.identifyPeer) {
               const verified = await plugin.identifyPeer(connection.remotePeer.toString());
               if (!verified) {
@@ -60,7 +59,7 @@ export class PluginManager {
                 return;
               }
             }
-            // 3b) Message size limiting: pipe through a transform that enforces max 1MB
+
             const MAX_MESSAGE_SIZE = 1 * 1024 * 1024; // 1 MB
             const sizeLimiter = new stream.Transform({
               transform(
@@ -91,7 +90,6 @@ export class PluginManager {
       }
     }
 
-    // 4) Add to registry
     this.plugins.set(caps.name, plugin);
     return true;
   }
@@ -106,10 +104,8 @@ export class PluginManager {
 
       const caps = plugin.getCapabilities();
 
-      // 1) Stop plugin
       await plugin.stop();
 
-      // 2) Unhandle each protocol
       for (const protocol of caps.protocols) {
         this.protocolHandlers.delete(protocol);
         if (this.context?.libp2p) {
@@ -117,7 +113,6 @@ export class PluginManager {
         }
       }
 
-      // 3) Remove from registry
       this.plugins.delete(pluginName);
       console.log(`PluginManager: plugin "${pluginName}" unregistered`);
       return true;
@@ -152,10 +147,8 @@ export class PluginManager {
   async stopAllPlugins(): Promise<void> {
     console.log("PluginManager: stopping all plugins…");
 
-    // 1) Clear protocol handlers map
     this.protocolHandlers.clear();
 
-    // 2) Stop each plugin
     for (const [name, plugin] of this.plugins.entries()) {
       try {
         await plugin.stop();
@@ -165,7 +158,6 @@ export class PluginManager {
       }
     }
 
-    // 3) Clear the plugin registry
     this.plugins.clear();
   }
 
